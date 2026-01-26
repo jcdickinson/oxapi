@@ -1,0 +1,18 @@
+[package]
+name = "oxapi-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Procedural macros for oxapi - not for direct use"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+heck = { workspace = true } #unified
+oxapi-impl = { path = "../oxapi-impl" }
+proc-macro2 = { workspace = true } #unified
+quote = { workspace = true } #unified
+syn = { workspace = true } #unified

@@ -1,0 +1,22 @@
+[package]
+name = "oxapi-impl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Implementation details for oxapi - not for direct use"
+
+[dependencies]
+heck = { workspace = true } #unified
+indexmap = "2.13"
+openapiv3 = "2.2"
+proc-macro2 = { workspace = true } #unified
+quote = { workspace = true } #unified
+schemars = "0.8"
+serde = { workspace = true } #unified
+serde_json = { workspace = true } #unified
+yaml_serde = { version = "0.10" }
+syn = { workspace = true } #unified
+thiserror = "2.0"
+typify = "0.5.0"

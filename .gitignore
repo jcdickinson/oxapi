@@ -1,0 +1,53 @@
+!.envrc
+local.env
+
+# Agent
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Build
+/target
+/docs/dist
+/result
+/build
+/.tmp
+.sccache/
+
+# ENV
+/.direnv
+
+# VCS
+/.jj
+
+# MCP
+.serena/
+.chunkhound/
+.cache/
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/stats.html
+*.log
+
+# TypeScript build info
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# IDE
+.vscode/
+frontend/*.tsbuildinfo
+/infrastructure/terraform/.terraform
+infrastructure/terraform/staging.tfplan
+infrastructure/terraform/plan
+*.tfstate
+tsconfig.node.tsbuildinfo
+/infrastructure/registry/.terraform
+infrastructure/registry/terraform.tfstate.backup
+infrastructure/terraform/tfplan
+
+seed_data
+Seed-Portal
+bff
+smp_poc
+
