@@ -39,11 +39,7 @@ mod petstore {
         );
 
         #[oxapi(post, "/pet/{petId}/uploadImage")]
-        async fn upload_file(
-            state: State<S>,
-            pet_id: Path<_>,
-            query: Query<UploadFileQuery>,
-        );
+        async fn upload_file(state: State<S>, pet_id: Path<_>, query: Query<UploadFileQuery>);
     }
 
     // Store operations
