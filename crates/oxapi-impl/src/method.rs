@@ -5,9 +5,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, GenericArgument, PathArguments, Type};
 
-use crate::Generator;
 use crate::openapi::Operation;
 use crate::types::TypeGenerator;
+use crate::{GeneratedTypeKind, Generator, TypeOverride};
 
 /// Transforms user-defined trait methods based on OpenAPI operations.
 pub struct MethodTransformer<'a> {
@@ -32,8 +32,41 @@ impl<'a> MethodTransformer<'a> {
             .to_upper_camel_case();
 
         let types_mod = self.types_mod;
-        let ok_type = format_ident!("{}Ok", op_name);
-        let err_type = format_ident!("{}Err", op_name);
+        let overrides = self.generator.type_overrides();
+
+        let suffixes = self.generator.response_suffixes();
+
+        // Get Ok type (may be renamed or replaced)
+        let ok_type: TokenStream =
+            match overrides.get(op.method, &op.path, GeneratedTypeKind::Ok) {
+                Some(TypeOverride::Rename { name, .. }) => {
+                    let ident = format_ident!("{}", name);
+                    quote! { #types_mod::#ident }
+                }
+                Some(TypeOverride::Replace(replacement)) => {
+                    replacement.clone()
+                }
+                None => {
+                    let ident = format_ident!("{}{}", op_name, suffixes.ok_suffix);
+                    quote! { #types_mod::#ident }
+                }
+            };
+
+        // Get Err type (may be renamed or replaced)
+        let err_type: TokenStream =
+            match overrides.get(op.method, &op.path, GeneratedTypeKind::Err) {
+                Some(TypeOverride::Rename { name, .. }) => {
+                    let ident = format_ident!("{}", name);
+                    quote! { #types_mod::#ident }
+                }
+                Some(TypeOverride::Replace(replacement)) => {
+                    replacement.clone()
+                }
+                None => {
+                    let ident = format_ident!("{}{}", op_name, suffixes.err_suffix);
+                    quote! { #types_mod::#ident }
+                }
+            };
 
         // Transform each parameter, filling in type elisions
         let transformed_params = self.transform_params(method, op)?;
@@ -42,7 +75,7 @@ impl<'a> MethodTransformer<'a> {
         let is_async = method.sig.asyncness.is_some();
 
         let return_type = quote! {
-            ::core::result::Result<#types_mod::#ok_type, #types_mod::#err_type>
+            ::core::result::Result<#ok_type, #err_type>
         };
 
         let method_name = &method.sig.ident;
@@ -123,9 +156,17 @@ impl<'a> MethodTransformer<'a> {
                     }
                     "Query" => {
                         // Fill in query parameter type
+                        let overrides = self.generator.type_overrides();
                         let inner = self.get_or_infer_inner(&last_segment.arguments, || {
-                            // Generate a query struct if needed
-                            if let Some((name, _)) = type_gen.generate_query_struct(op) {
+                            // Check for replacement first
+                            if let Some(TypeOverride::Replace(replacement)) =
+                                overrides.get(op.method, &op.path, GeneratedTypeKind::Query)
+                            {
+                                return replacement.clone();
+                            }
+
+                            // Generate a query struct if needed (may be renamed)
+                            if let Some((name, _)) = type_gen.generate_query_struct(op, overrides) {
                                 quote! { #types_mod::#name }
                             } else {
                                 quote! { () }

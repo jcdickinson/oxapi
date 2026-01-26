@@ -8,6 +8,9 @@ use tokio::sync::RwLock;
 // Module-based macro with split traits by responsibility
 #[oxapi::oxapi(axum, "petstore.json")]
 mod petstore {
+    #[rename(post, "/pet", ok)]
+    struct AddPetResponse;
+
     // Pet operations - generic over state type for dependency injection
     trait PetService<S: PetStateProvider> {
         #[oxapi(map)]
@@ -131,18 +134,18 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
     async fn get_pet_by_id(
         State(state): State<S>,
         Path(pet_id): Path<i64>,
-    ) -> Result<GetPetByIdOk, GetPetByIdErr> {
+    ) -> Result<GetPetByIdResponse, GetPetByIdError> {
         let pets = state.pets().read().await;
         match pets.get(&pet_id) {
-            Some(pet) => Ok(GetPetByIdOk::Status200(pet.clone())),
-            None => Err(GetPetByIdErr::Status404),
+            Some(pet) => Ok(GetPetByIdResponse::Status200(pet.clone())),
+            None => Err(GetPetByIdError::Status404),
         }
     }
 
     async fn add_pet(
         State(state): State<S>,
         Json(mut pet): Json<Pet>,
-    ) -> Result<AddPetOk, AddPetErr> {
+    ) -> Result<AddPetResponse, AddPetError> {
         let id = if let Some(id) = pet.id {
             id
         } else {
@@ -154,34 +157,34 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
         pet.id = Some(id);
         state.pets().write().await.insert(id, pet.clone());
-        Ok(AddPetOk::Status200(pet))
+        Ok(AddPetResponse::Status200(pet))
     }
 
     async fn update_pet(
         State(state): State<S>,
         Json(pet): Json<Pet>,
-    ) -> Result<UpdatePetOk, UpdatePetErr> {
-        let id = pet.id.ok_or(UpdatePetErr::Status400)?;
+    ) -> Result<UpdatePetResponse, UpdatePetError> {
+        let id = pet.id.ok_or(UpdatePetError::Status400)?;
         let mut pets = state.pets().write().await;
         if !pets.contains_key(&id) {
-            return Err(UpdatePetErr::Status404);
+            return Err(UpdatePetError::Status404);
         }
         pets.insert(id, pet.clone());
-        Ok(UpdatePetOk::Status200(pet))
+        Ok(UpdatePetResponse::Status200(pet))
     }
 
     async fn delete_pet(
         State(state): State<S>,
         Path(pet_id): Path<i64>,
-    ) -> Result<DeletePetOk, DeletePetErr> {
+    ) -> Result<DeletePetResponse, DeletePetError> {
         state.pets().write().await.remove(&pet_id);
-        Ok(DeletePetOk::Status200)
+        Ok(DeletePetResponse::Status200)
     }
 
     async fn find_pets_by_status(
         State(state): State<S>,
         Query(query): Query<FindPetsByStatusQuery>,
-    ) -> Result<FindPetsByStatusOk, FindPetsByStatusErr> {
+    ) -> Result<FindPetsByStatusResponse, FindPetsByStatusError> {
         let pets = state.pets().read().await;
         let filtered: Vec<Pet> =
             pets.values()
@@ -192,13 +195,13 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
                 })
                 .cloned()
                 .collect();
-        Ok(FindPetsByStatusOk::Status200(filtered))
+        Ok(FindPetsByStatusResponse::Status200(filtered))
     }
 
     async fn find_pets_by_tags(
         State(state): State<S>,
         Query(query): Query<FindPetsByTagsQuery>,
-    ) -> Result<FindPetsByTagsOk, FindPetsByTagsErr> {
+    ) -> Result<FindPetsByTagsResponse, FindPetsByTagsError> {
         let pets = state.pets().read().await;
         let filtered: Vec<Pet> = pets
             .values()
@@ -210,14 +213,14 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
             })
             .cloned()
             .collect();
-        Ok(FindPetsByTagsOk::Status200(filtered))
+        Ok(FindPetsByTagsResponse::Status200(filtered))
     }
 
     async fn update_pet_with_form(
         State(state): State<S>,
         Path(pet_id): Path<i64>,
         Query(query): Query<UpdatePetWithFormQuery>,
-    ) -> Result<UpdatePetWithFormOk, UpdatePetWithFormErr> {
+    ) -> Result<UpdatePetWithFormResponse, UpdatePetWithFormError> {
         let mut pets = state.pets().write().await;
         if let Some(pet) = pets.get_mut(&pet_id) {
             if let Some(name) = query.name {
@@ -228,12 +231,12 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
                     "available" => PetStatus::Available,
                     "pending" => PetStatus::Pending,
                     "sold" => PetStatus::Sold,
-                    _ => return Err(UpdatePetWithFormErr::Status400),
+                    _ => return Err(UpdatePetWithFormError::Status400),
                 });
             }
-            Ok(UpdatePetWithFormOk::Status200)
+            Ok(UpdatePetWithFormResponse::Status200)
         } else {
-            Err(UpdatePetWithFormErr::Status400)
+            Err(UpdatePetWithFormError::Status400)
         }
     }
 
@@ -241,8 +244,8 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
         State(_state): State<S>,
         Path(_pet_id): Path<i64>,
         Query(_query): Query<UploadFileQuery>,
-    ) -> Result<UploadFileOk, UploadFileErr> {
-        Ok(UploadFileOk::Status200(ApiResponse {
+    ) -> Result<UploadFileResponse, UploadFileError> {
+        Ok(UploadFileResponse::Status200(ApiResponse {
             code: Some(200),
             type_: Some("success".to_string()),
             message: Some("File uploaded".to_string()),
@@ -256,7 +259,7 @@ struct StoreServiceImpl;
 impl StoreService for StoreServiceImpl {
     async fn get_inventory(
         State(state): State<StoreState>,
-    ) -> Result<GetInventoryOk, GetInventoryErr> {
+    ) -> Result<GetInventoryResponse, GetInventoryError> {
         let pets = state.pets.read().await;
         let mut inventory = serde_json::Map::new();
         for pet in pets.values() {
@@ -270,7 +273,7 @@ impl StoreService for StoreServiceImpl {
                 }
             }
         }
-        Ok(GetInventoryOk::Status200(serde_json::Value::Object(
+        Ok(GetInventoryResponse::Status200(serde_json::Value::Object(
             inventory,
         )))
     }
@@ -278,7 +281,7 @@ impl StoreService for StoreServiceImpl {
     async fn place_order(
         State(state): State<StoreState>,
         Json(mut order): Json<Order>,
-    ) -> Result<PlaceOrderOk, PlaceOrderErr> {
+    ) -> Result<PlaceOrderResponse, PlaceOrderError> {
         let id = if let Some(id) = order.id {
             id
         } else {
@@ -289,29 +292,29 @@ impl StoreService for StoreServiceImpl {
         };
         order.id = Some(id);
         state.orders.write().await.insert(id, order.clone());
-        Ok(PlaceOrderOk::Status200(order))
+        Ok(PlaceOrderResponse::Status200(order))
     }
 
     async fn get_order_by_id(
         State(state): State<StoreState>,
         Path(order_id): Path<i64>,
-    ) -> Result<GetOrderByIdOk, GetOrderByIdErr> {
+    ) -> Result<GetOrderByIdResponse, GetOrderByIdError> {
         let orders = state.orders.read().await;
         match orders.get(&order_id) {
-            Some(order) => Ok(GetOrderByIdOk::Status200(order.clone())),
-            None => Err(GetOrderByIdErr::Status404),
+            Some(order) => Ok(GetOrderByIdResponse::Status200(order.clone())),
+            None => Err(GetOrderByIdError::Status404),
         }
     }
 
     async fn delete_order(
         State(state): State<StoreState>,
         Path(order_id): Path<i64>,
-    ) -> Result<DeleteOrderOk, DeleteOrderErr> {
+    ) -> Result<DeleteOrderResponse, DeleteOrderError> {
         let mut orders = state.orders.write().await;
         if orders.remove(&order_id).is_some() {
-            Ok(DeleteOrderOk::Status200)
+            Ok(DeleteOrderResponse::Status200)
         } else {
-            Err(DeleteOrderErr::Status404)
+            Err(DeleteOrderError::Status404)
         }
     }
 }
@@ -323,16 +326,16 @@ impl UserService for UserServiceImpl {
     async fn create_user(
         State(state): State<UserState>,
         Json(user): Json<User>,
-    ) -> Result<CreateUserOk, CreateUserErr> {
+    ) -> Result<CreateUserResponse, CreateUserError> {
         if let Some(username) = &user.username {
             state
                 .users
                 .write()
                 .await
                 .insert(username.clone(), user.clone());
-            Ok(CreateUserOk::Status200(user))
+            Ok(CreateUserResponse::Status200(user))
         } else {
-            Err(CreateUserErr::Default(
+            Err(CreateUserError::Default(
                 axum::http::StatusCode::BAD_REQUEST,
                 Error {
                     code: "missing_username".to_string(),
@@ -345,7 +348,7 @@ impl UserService for UserServiceImpl {
     async fn create_users_with_list_input(
         State(state): State<UserState>,
         Json(users): Json<Vec<User>>,
-    ) -> Result<CreateUsersWithListInputOk, CreateUsersWithListInputErr> {
+    ) -> Result<CreateUsersWithListInputResponse, CreateUsersWithListInputError> {
         let mut store = state.users.write().await;
         let mut last_user = None;
         for user in users {
@@ -354,7 +357,7 @@ impl UserService for UserServiceImpl {
                 store.insert(username.clone(), user);
             }
         }
-        Ok(CreateUsersWithListInputOk::Status200(
+        Ok(CreateUsersWithListInputResponse::Status200(
             last_user.unwrap_or_default(),
         ))
     }
@@ -362,31 +365,31 @@ impl UserService for UserServiceImpl {
     async fn login_user(
         State(state): State<UserState>,
         Query(query): Query<LoginUserQuery>,
-    ) -> Result<LoginUserOk, LoginUserErr> {
+    ) -> Result<LoginUserResponse, LoginUserError> {
         let users = state.users.read().await;
         if let (Some(username), Some(_password)) = (&query.username, &query.password) {
             if users.contains_key(username) {
-                Ok(LoginUserOk::Status200("session-token-12345".to_string()))
+                Ok(LoginUserResponse::Status200("session-token-12345".to_string()))
             } else {
-                Err(LoginUserErr::Status400)
+                Err(LoginUserError::Status400)
             }
         } else {
-            Err(LoginUserErr::Status400)
+            Err(LoginUserError::Status400)
         }
     }
 
-    async fn logout_user(State(_state): State<UserState>) -> Result<LogoutUserOk, LogoutUserErr> {
-        Ok(LogoutUserOk::Status200)
+    async fn logout_user(State(_state): State<UserState>) -> Result<LogoutUserResponse, LogoutUserError> {
+        Ok(LogoutUserResponse::Status200)
     }
 
     async fn get_user_by_name(
         State(state): State<UserState>,
         Path(username): Path<String>,
-    ) -> Result<GetUserByNameOk, GetUserByNameErr> {
+    ) -> Result<GetUserByNameResponse, GetUserByNameError> {
         let users = state.users.read().await;
         match users.get(&username) {
-            Some(user) => Ok(GetUserByNameOk::Status200(user.clone())),
-            None => Err(GetUserByNameErr::Status404),
+            Some(user) => Ok(GetUserByNameResponse::Status200(user.clone())),
+            None => Err(GetUserByNameError::Status404),
         }
     }
 
@@ -394,21 +397,21 @@ impl UserService for UserServiceImpl {
         State(state): State<UserState>,
         Path(username): Path<String>,
         Json(user): Json<User>,
-    ) -> Result<UpdateUserOk, UpdateUserErr> {
+    ) -> Result<UpdateUserResponse, UpdateUserError> {
         let mut users = state.users.write().await;
         users.insert(username, user);
-        Ok(UpdateUserOk::Status200)
+        Ok(UpdateUserResponse::Status200)
     }
 
     async fn delete_user(
         State(state): State<UserState>,
         Path(username): Path<String>,
-    ) -> Result<DeleteUserOk, DeleteUserErr> {
+    ) -> Result<DeleteUserResponse, DeleteUserError> {
         let mut users = state.users.write().await;
         if users.remove(&username).is_some() {
-            Ok(DeleteUserOk::Status200)
+            Ok(DeleteUserResponse::Status200)
         } else {
-            Err(DeleteUserErr::Status404)
+            Err(DeleteUserError::Status404)
         }
     }
 }

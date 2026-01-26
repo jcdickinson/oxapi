@@ -15,4 +15,5 @@ heck = { workspace = true } #unified
 oxapi-impl = { workspace = true }
 proc-macro2 = { workspace = true } #unified
 quote = { workspace = true } #unified
+schemars = "0.8"
 syn = { workspace = true } #unified

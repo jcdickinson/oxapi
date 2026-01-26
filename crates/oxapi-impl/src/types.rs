@@ -11,7 +11,7 @@ use quote::{format_ident, quote};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::openapi::{Operation, OperationParam, ParamLocation, ParsedSpec, RequestBody};
-use crate::{Error, Result};
+use crate::{Error, GeneratedTypeKind, Result, TypeOverride, TypeOverrides};
 
 /// Type generator that wraps typify's TypeSpace.
 pub struct TypeGenerator {
@@ -22,9 +22,13 @@ pub struct TypeGenerator {
 }
 
 impl TypeGenerator {
-    /// Create a new type generator from a parsed spec.
+    /// Create a new type generator from a parsed spec with default settings.
     pub fn new(spec: &ParsedSpec) -> Result<Self> {
-        let settings = TypeSpaceSettings::default();
+        Self::with_settings(spec, TypeSpaceSettings::default())
+    }
+
+    /// Create a new type generator from a parsed spec with custom settings.
+    pub fn with_settings(spec: &ParsedSpec, settings: TypeSpaceSettings) -> Result<Self> {
         let mut type_space = TypeSpace::new(&settings);
 
         // Add all component schemas to the type space
@@ -173,7 +177,16 @@ impl TypeGenerator {
     }
 
     /// Generate a query params struct for an operation.
-    pub fn generate_query_struct(&self, op: &Operation) -> Option<(syn::Ident, TokenStream)> {
+    pub fn generate_query_struct(
+        &self,
+        op: &Operation,
+        overrides: &TypeOverrides,
+    ) -> Option<(syn::Ident, TokenStream)> {
+        // Check if replaced
+        if overrides.is_replaced(op.method, &op.path, GeneratedTypeKind::Query) {
+            return None;
+        }
+
         let query_params: Vec<_> = op
             .parameters
             .iter()
@@ -184,13 +197,22 @@ impl TypeGenerator {
             return None;
         }
 
-        let struct_name = format_ident!(
+        let default_name = format!(
             "{}Query",
             op.operation_id
                 .as_deref()
                 .unwrap_or(&op.path)
                 .to_upper_camel_case()
         );
+
+        // Check for rename override
+        let struct_name = if let Some(TypeOverride::Rename { name, .. }) =
+            overrides.get(op.method, &op.path, GeneratedTypeKind::Query)
+        {
+            format_ident!("{}", name)
+        } else {
+            format_ident!("{}", default_name)
+        };
 
         let fields = query_params.iter().map(|param| {
             let name = format_ident!("{}", heck::AsSnakeCase(&param.name).to_string());
