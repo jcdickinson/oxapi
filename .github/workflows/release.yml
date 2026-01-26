@@ -2,7 +2,7 @@ name: Release
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,7 +11,6 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: github.event.release.draft == true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,8 +19,12 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
+          TAG="${{ github.event.release.tag_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+            echo "Error: Tag must start with 'v' followed by a version number (e.g., v1.0.0)"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install Rust toolchain
