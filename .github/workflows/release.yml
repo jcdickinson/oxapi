@@ -11,6 +11,8 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +34,7 @@ jobs:
 
       - name: Update version in Cargo.toml
         run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}" # Set by release workflow/' Cargo.toml
 
       - name: Verify build
         run: cargo build --all-targets
