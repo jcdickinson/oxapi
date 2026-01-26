@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use heck::ToUpperCamelCase;
-use openapiv3::{IntegerFormat, NumberFormat, ReferenceOr, Schema, SchemaKind, Type, VariantOrUnknownOrEmpty};
+use openapiv3::{
+    IntegerFormat, NumberFormat, ReferenceOr, Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use typify::{TypeSpace, TypeSpaceSettings};
@@ -75,7 +77,11 @@ impl TypeGenerator {
     }
 
     /// Generate a type for a boxed schema reference.
-    pub fn type_for_boxed_schema(&self, schema: &ReferenceOr<Box<Schema>>, name_hint: &str) -> TokenStream {
+    pub fn type_for_boxed_schema(
+        &self,
+        schema: &ReferenceOr<Box<Schema>>,
+        name_hint: &str,
+    ) -> TokenStream {
         match schema {
             ReferenceOr::Reference { reference } => {
                 if let Some(type_name) = self.get_type_name(reference) {
@@ -93,20 +99,16 @@ impl TypeGenerator {
     fn type_for_inline_schema(&self, schema: &Schema, name_hint: &str) -> TokenStream {
         match &schema.schema_kind {
             SchemaKind::Type(Type::String(_)) => quote! { String },
-            SchemaKind::Type(Type::Integer(int_type)) => {
-                match &int_type.format {
-                    VariantOrUnknownOrEmpty::Item(IntegerFormat::Int32) => quote! { i32 },
-                    VariantOrUnknownOrEmpty::Item(IntegerFormat::Int64) => quote! { i64 },
-                    _ => quote! { i64 },
-                }
-            }
-            SchemaKind::Type(Type::Number(num_type)) => {
-                match &num_type.format {
-                    VariantOrUnknownOrEmpty::Item(NumberFormat::Float) => quote! { f32 },
-                    VariantOrUnknownOrEmpty::Item(NumberFormat::Double) => quote! { f64 },
-                    _ => quote! { f64 },
-                }
-            }
+            SchemaKind::Type(Type::Integer(int_type)) => match &int_type.format {
+                VariantOrUnknownOrEmpty::Item(IntegerFormat::Int32) => quote! { i32 },
+                VariantOrUnknownOrEmpty::Item(IntegerFormat::Int64) => quote! { i64 },
+                _ => quote! { i64 },
+            },
+            SchemaKind::Type(Type::Number(num_type)) => match &num_type.format {
+                VariantOrUnknownOrEmpty::Item(NumberFormat::Float) => quote! { f32 },
+                VariantOrUnknownOrEmpty::Item(NumberFormat::Double) => quote! { f64 },
+                _ => quote! { f64 },
+            },
             SchemaKind::Type(Type::Boolean(_)) => quote! { bool },
             SchemaKind::Type(Type::Array(arr)) => {
                 if let Some(items) = &arr.items {
@@ -154,9 +156,17 @@ impl TypeGenerator {
 
     /// Get the type for a response body.
     #[allow(dead_code)]
-    pub fn response_type(&self, schema: &Option<ReferenceOr<Schema>>, op_name: &str, status: u16) -> TokenStream {
+    pub fn response_type(
+        &self,
+        schema: &Option<ReferenceOr<Schema>>,
+        op_name: &str,
+        status: u16,
+    ) -> TokenStream {
         if let Some(schema) = schema {
-            self.type_for_schema(schema, &format!("{}Response{}", op_name.to_upper_camel_case(), status))
+            self.type_for_schema(
+                schema,
+                &format!("{}Response{}", op_name.to_upper_camel_case(), status),
+            )
         } else {
             quote! { () }
         }

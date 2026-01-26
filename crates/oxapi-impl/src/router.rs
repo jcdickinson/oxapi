@@ -3,8 +3,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::openapi::HttpMethod;
 use crate::Generator;
+use crate::openapi::HttpMethod;
 
 /// Generator for axum router code.
 pub struct RouterGenerator<'a> {
@@ -20,10 +20,7 @@ impl<'a> RouterGenerator<'a> {
     /// Generate the body of the map_routes function.
     ///
     /// The methods parameter is a list of (method_name, http_method, path) tuples.
-    pub fn generate_map_routes(
-        &self,
-        methods: &[(syn::Ident, HttpMethod, String)],
-    ) -> TokenStream {
+    pub fn generate_map_routes(&self, methods: &[(syn::Ident, HttpMethod, String)]) -> TokenStream {
         if methods.is_empty() {
             return quote! { router };
         }

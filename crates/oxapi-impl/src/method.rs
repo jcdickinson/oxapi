@@ -5,9 +5,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, GenericArgument, PathArguments, Type};
 
+use crate::Generator;
 use crate::openapi::Operation;
 use crate::types::TypeGenerator;
-use crate::Generator;
 
 /// Transforms user-defined trait methods based on OpenAPI operations.
 pub struct MethodTransformer<'a> {
@@ -24,11 +24,7 @@ impl<'a> MethodTransformer<'a> {
     }
 
     /// Transform a trait method based on its operation.
-    pub fn transform(
-        &self,
-        method: &syn::TraitItemFn,
-        op: &Operation,
-    ) -> syn::Result<TokenStream> {
+    pub fn transform(&self, method: &syn::TraitItemFn, op: &Operation) -> syn::Result<TokenStream> {
         let op_name = op
             .operation_id
             .as_deref()
@@ -109,9 +105,11 @@ impl<'a> MethodTransformer<'a> {
 
         match ty {
             Type::Path(type_path) => {
-                let last_segment = type_path.path.segments.last().ok_or_else(|| {
-                    syn::Error::new_spanned(ty, "empty type path")
-                })?;
+                let last_segment = type_path
+                    .path
+                    .segments
+                    .last()
+                    .ok_or_else(|| syn::Error::new_spanned(ty, "empty type path"))?;
 
                 let type_name = last_segment.ident.to_string();
 
@@ -185,9 +183,10 @@ impl<'a> MethodTransformer<'a> {
                     Err(syn::Error::new_spanned(args, "expected type argument"))
                 }
             }
-            PathArguments::Parenthesized(_) => {
-                Err(syn::Error::new_spanned(args, "unexpected parenthesized arguments"))
-            }
+            PathArguments::Parenthesized(_) => Err(syn::Error::new_spanned(
+                args,
+                "unexpected parenthesized arguments",
+            )),
         }
     }
 }

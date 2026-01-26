@@ -77,9 +77,8 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
 
 /// Resolve the spec path relative to CARGO_MANIFEST_DIR.
 fn resolve_spec_path(lit: &LitStr) -> syn::Result<std::path::PathBuf> {
-    let dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
-        syn::Error::new(lit.span(), "CARGO_MANIFEST_DIR not set")
-    })?;
+    let dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| syn::Error::new(lit.span(), "CARGO_MANIFEST_DIR not set"))?;
 
     let path = std::path::Path::new(&dir).join(lit.value());
     Ok(path)
@@ -103,7 +102,7 @@ impl syn::parse::Parse for MacroArgs {
                 return Err(syn::Error::new(
                     framework.span(),
                     format!("unsupported framework: {}", other),
-                ))
+                ));
             }
         };
 
@@ -152,7 +151,8 @@ impl TraitProcessor {
         // Parse all method attributes and collect coverage info
         let mut covered: HashMap<(oxapi_impl::HttpMethod, String), ()> = HashMap::new();
         let mut map_method: Option<&syn::TraitItemFn> = None;
-        let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> = Vec::new();
+        let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
+            Vec::new();
 
         for item in &self.trait_item.items {
             if let syn::TraitItem::Fn(method) = item {
@@ -161,7 +161,10 @@ impl TraitProcessor {
                         OxapiAttr::Map => {
                             map_method = Some(method);
                         }
-                        OxapiAttr::Route { method: http_method, path } => {
+                        OxapiAttr::Route {
+                            method: http_method,
+                            path,
+                        } => {
                             covered.insert((http_method, path.clone()), ());
                             handler_methods.push((method, http_method, path));
                         }
@@ -176,9 +179,9 @@ impl TraitProcessor {
         }
 
         // Validate coverage
-        self.generator.validate_coverage(&covered).map_err(|e| {
-            syn::Error::new_spanned(&self.trait_item, e.to_string())
-        })?;
+        self.generator
+            .validate_coverage(&covered)
+            .map_err(|e| syn::Error::new_spanned(&self.trait_item, e.to_string()))?;
 
         // Generate types module
         let types = self.generator.generate_types();
@@ -190,9 +193,12 @@ impl TraitProcessor {
         // Generate map_routes if present
         if let Some(map_fn) = map_method {
             let router_gen = oxapi_impl::RouterGenerator::new(&self.generator);
-            let map_body = router_gen.generate_map_routes(&handler_methods.iter().map(|(m, method, path)| {
-                (m.sig.ident.clone(), *method, path.clone())
-            }).collect::<Vec<_>>());
+            let map_body = router_gen.generate_map_routes(
+                &handler_methods
+                    .iter()
+                    .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
+                    .collect::<Vec<_>>(),
+            );
 
             let sig = &map_fn.sig;
             transformed_methods.push(quote! {
@@ -203,11 +209,18 @@ impl TraitProcessor {
         }
 
         // Generate handler methods
-        let method_transformer = oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
+        let method_transformer =
+            oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
         for (method, http_method, path) in &handler_methods {
-            let op = self.generator.get_operation(*http_method, path).ok_or_else(|| {
-                syn::Error::new_spanned(method, format!("operation not found: {} {}", http_method, path))
-            })?;
+            let op = self
+                .generator
+                .get_operation(*http_method, path)
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        method,
+                        format!("operation not found: {} {}", http_method, path),
+                    )
+                })?;
 
             let transformed = method_transformer.transform(method, op)?;
             transformed_methods.push(transformed);
@@ -215,7 +228,10 @@ impl TraitProcessor {
 
         // Generate the full output
         let vis = &self.trait_item.vis;
-        let trait_attrs: Vec<_> = self.trait_item.attrs.iter()
+        let trait_attrs: Vec<_> = self
+            .trait_item
+            .attrs
+            .iter()
             .filter(|a| !a.path().is_ident("oxapi"))
             .collect();
 
@@ -304,7 +320,8 @@ impl ModuleProcessor {
 
         for trait_item in &traits {
             let mut map_method: Option<&syn::TraitItemFn> = None;
-            let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> = Vec::new();
+            let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
+                Vec::new();
 
             for item in &trait_item.items {
                 if let syn::TraitItem::Fn(method) = item {
@@ -313,13 +330,19 @@ impl ModuleProcessor {
                             OxapiAttr::Map => {
                                 map_method = Some(method);
                             }
-                            OxapiAttr::Route { method: http_method, path } => {
+                            OxapiAttr::Route {
+                                method: http_method,
+                                path,
+                            } => {
                                 // Check for duplicates across traits
                                 let key = (http_method, path.clone());
                                 if all_covered.contains_key(&key) {
                                     return Err(syn::Error::new_spanned(
                                         method,
-                                        format!("operation {} {} is already defined in another trait", http_method, path),
+                                        format!(
+                                            "operation {} {} is already defined in another trait",
+                                            http_method, path
+                                        ),
                                     ));
                                 }
                                 all_covered.insert(key, ());
@@ -343,9 +366,9 @@ impl ModuleProcessor {
         }
 
         // Validate coverage against spec
-        self.generator.validate_coverage(&all_covered).map_err(|e| {
-            syn::Error::new_spanned(&self.mod_item, e.to_string())
-        })?;
+        self.generator
+            .validate_coverage(&all_covered)
+            .map_err(|e| syn::Error::new_spanned(&self.mod_item, e.to_string()))?;
 
         // Generate shared types module
         let types = self.generator.generate_types();
@@ -353,14 +376,18 @@ impl ModuleProcessor {
 
         // Generate each trait
         let types_mod_name = syn::Ident::new("types", proc_macro2::Span::call_site());
-        let method_transformer = oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
+        let method_transformer =
+            oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
 
         let mut generated_traits = Vec::new();
 
         for info in &trait_infos {
             let trait_name = &info.trait_item.ident;
             let _trait_vis = &info.trait_item.vis;
-            let trait_attrs: Vec<_> = info.trait_item.attrs.iter()
+            let trait_attrs: Vec<_> = info
+                .trait_item
+                .attrs
+                .iter()
                 .filter(|a| !a.path().is_ident("oxapi"))
                 .collect();
 
@@ -369,9 +396,13 @@ impl ModuleProcessor {
             // Generate map_routes if present
             if let Some(map_fn) = info.map_method {
                 let router_gen = oxapi_impl::RouterGenerator::new(&self.generator);
-                let map_body = router_gen.generate_map_routes(&info.handler_methods.iter().map(|(m, method, path)| {
-                    (m.sig.ident.clone(), *method, path.clone())
-                }).collect::<Vec<_>>());
+                let map_body = router_gen.generate_map_routes(
+                    &info
+                        .handler_methods
+                        .iter()
+                        .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
+                        .collect::<Vec<_>>(),
+                );
 
                 let sig = &map_fn.sig;
                 transformed_methods.push(quote! {
@@ -383,9 +414,15 @@ impl ModuleProcessor {
 
             // Generate handler methods
             for (method, http_method, path) in &info.handler_methods {
-                let op = self.generator.get_operation(*http_method, path).ok_or_else(|| {
-                    syn::Error::new_spanned(method, format!("operation not found: {} {}", http_method, path))
-                })?;
+                let op = self
+                    .generator
+                    .get_operation(*http_method, path)
+                    .ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            method,
+                            format!("operation not found: {} {}", http_method, path),
+                        )
+                    })?;
 
                 let transformed = method_transformer.transform(method, op)?;
                 transformed_methods.push(transformed);
