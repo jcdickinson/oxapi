@@ -186,6 +186,7 @@ impl TraitProcessor {
         // Generate types module
         let types = self.generator.generate_types();
         let responses = self.generator.generate_responses();
+        let query_structs = self.generator.generate_query_structs();
 
         // Generate transformed methods
         let mut transformed_methods = Vec::new();
@@ -245,6 +246,7 @@ impl TraitProcessor {
 
                 #types
                 #responses
+                #query_structs
             }
 
             #(#trait_attrs)*
@@ -377,6 +379,7 @@ impl ModuleProcessor {
         // Generate shared types module
         let types = self.generator.generate_types();
         let responses = self.generator.generate_responses();
+        let query_structs = self.generator.generate_query_structs();
 
         // Generate each trait
         let types_mod_name = syn::Ident::new("types", proc_macro2::Span::call_site());
@@ -454,6 +457,7 @@ impl ModuleProcessor {
 
                     #types
                     #responses
+                    #query_structs
                 }
 
                 #(#generated_traits)*

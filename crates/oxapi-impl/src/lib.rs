@@ -85,6 +85,17 @@ impl Generator {
         ResponseGenerator::new(&self.spec, &self.type_gen).generate_all()
     }
 
+    /// Generate query parameter structs for all operations.
+    pub fn generate_query_structs(&self) -> TokenStream {
+        let mut structs = Vec::new();
+        for op in self.spec.operations() {
+            if let Some((_, definition)) = self.type_gen.generate_query_struct(op) {
+                structs.push(definition);
+            }
+        }
+        quote::quote! { #(#structs)* }
+    }
+
     /// Look up an operation by HTTP method and path.
     pub fn get_operation(&self, method: HttpMethod, path: &str) -> Option<&Operation> {
         self.spec.get_operation(method, path)

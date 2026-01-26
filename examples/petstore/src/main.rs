@@ -26,20 +26,16 @@ mod petstore {
         async fn delete_pet(state: State<S>, pet_id: Path<_>);
 
         #[oxapi(get, "/pet/findByStatus")]
-        async fn find_pets_by_status(state: State<S>, query: Query<FindByStatusQuery>);
+        async fn find_pets_by_status(state: State<S>, query: Query<_>);
 
         #[oxapi(get, "/pet/findByTags")]
-        async fn find_pets_by_tags(state: State<S>, query: Query<FindByTagsQuery>);
+        async fn find_pets_by_tags(state: State<S>, query: Query<_>);
 
         #[oxapi(post, "/pet/{petId}")]
-        async fn update_pet_with_form(
-            state: State<S>,
-            pet_id: Path<_>,
-            query: Query<UpdatePetWithFormQuery>,
-        );
+        async fn update_pet_with_form(state: State<S>, pet_id: Path<_>, query: Query<_>);
 
         #[oxapi(post, "/pet/{petId}/uploadImage")]
-        async fn upload_file(state: State<S>, pet_id: Path<_>, query: Query<UploadFileQuery>);
+        async fn upload_file(state: State<S>, pet_id: Path<_>, query: Query<_>);
     }
 
     // Store operations
@@ -72,7 +68,7 @@ mod petstore {
         async fn create_users_with_list_input(state: State<UserState>, body: Json<_>);
 
         #[oxapi(get, "/user/login")]
-        async fn login_user(state: State<UserState>, query: Query<LoginQuery>);
+        async fn login_user(state: State<UserState>, query: Query<_>);
 
         #[oxapi(get, "/user/logout")]
         async fn logout_user(state: State<UserState>);
@@ -126,37 +122,6 @@ pub struct StoreState {
 #[derive(Clone)]
 pub struct UserState {
     users: Arc<RwLock<HashMap<String, User>>>,
-}
-
-// Query params
-#[derive(Debug, serde::Deserialize)]
-pub struct FindByStatusQuery {
-    #[serde(default)]
-    pub status: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct FindByTagsQuery {
-    #[serde(default)]
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct UpdatePetWithFormQuery {
-    pub name: Option<String>,
-    pub status: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct UploadFileQuery {
-    #[serde(rename = "additionalMetadata")]
-    pub additional_metadata: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginQuery {
-    pub username: Option<String>,
-    pub password: Option<String>,
 }
 
 // Pet service implementation - generic over any state that provides pet data
@@ -215,7 +180,7 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn find_pets_by_status(
         State(state): State<S>,
-        Query(query): Query<FindByStatusQuery>,
+        Query(query): Query<FindPetsByStatusQuery>,
     ) -> Result<FindPetsByStatusOk, FindPetsByStatusErr> {
         let pets = state.pets().read().await;
         let filtered: Vec<Pet> =
@@ -232,7 +197,7 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn find_pets_by_tags(
         State(state): State<S>,
-        Query(query): Query<FindByTagsQuery>,
+        Query(query): Query<FindPetsByTagsQuery>,
     ) -> Result<FindPetsByTagsOk, FindPetsByTagsErr> {
         let pets = state.pets().read().await;
         let filtered: Vec<Pet> = pets
@@ -396,7 +361,7 @@ impl UserService for UserServiceImpl {
 
     async fn login_user(
         State(state): State<UserState>,
-        Query(query): Query<LoginQuery>,
+        Query(query): Query<LoginUserQuery>,
     ) -> Result<LoginUserOk, LoginUserErr> {
         let users = state.users.read().await;
         if let (Some(username), Some(_password)) = (&query.username, &query.password) {
