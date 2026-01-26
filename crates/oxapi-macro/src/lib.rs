@@ -5,7 +5,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use schemars::schema::{InstanceType, SchemaObject, SingleOrVec};
 use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 
@@ -176,13 +176,13 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// #[oxapi(axum, "spec.json")]
 /// mod api {
 ///     // Rename "Veggie" from the schema to "Vegetable" in generated code
-///     #[rename("Vegetable")]
-///     struct Veggie;
+///     #[rename("Veggie")]
+///     struct Vegetable;
 ///
 ///     // Add extra derives to a schema type
-///     #[rename("Vegetable")]
+///     #[rename("Veggie")]
 ///     #[derive(schemars::JsonSchema, PartialEq, Eq, Hash)]
-///     struct Veggie;
+///     struct Vegetable;
 /// }
 /// ```
 ///
@@ -287,10 +287,10 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// #[oxapi::oxapi(axum, "petstore.json")]
 /// #[convert(into = uuid::Uuid, type = "string", format = "uuid")]
 /// mod api {
-///     // Rename a schema type
-///     #[rename("Animal")]
+///     // Rename a schema type (Pet from OpenAPI becomes Animal in Rust)
+///     #[rename("Pet")]
 ///     #[derive(Clone)]
-///     struct Pet;
+///     struct Animal;
 ///
 ///     // Replace a generated response type
 ///     #[replace(get, "/pet/{petId}", err)]
@@ -363,25 +363,34 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
         .map_err(|e| {
             syn::Error::new(args.spec_path.span(), format!("failed to load spec: {}", e))
         })?;
-        let processor = TraitProcessor::new(generator, args.framework, trait_item)?;
+        let processor = TraitProcessor::new(generator, trait_item)?;
         processor.generate()
     } else if let Ok(mod_item) = syn::parse2::<ItemMod>(item) {
         // Parse convert attributes from module and build settings
-        let (settings, overrides) = build_type_settings(&mod_item)?;
+        let (settings, overrides, schema_renames) = build_type_settings(&mod_item)?;
+
+        // Collect schema names for validation
+        let schema_names_to_validate: Vec<String> = schema_renames.keys().cloned().collect();
 
         // Load the OpenAPI spec with custom settings
         let spec_path = resolve_spec_path(&args.spec_path)?;
-        let generator = oxapi_impl::Generator::from_file_with_all_settings(
+        let generator = oxapi_impl::Generator::from_file_with_all_settings_and_renames(
             &spec_path,
             settings,
             overrides,
             response_suffixes,
+            schema_renames,
         )
         .map_err(|e| {
             syn::Error::new(args.spec_path.span(), format!("failed to load spec: {}", e))
         })?;
 
-        let processor = ModuleProcessor::new(generator, args.framework, mod_item, args.unwrap)?;
+        // Validate that all schema names used in renames exist
+        generator
+            .validate_schema_names(&schema_names_to_validate)
+            .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), e.to_string()))?;
+
+        let processor = ModuleProcessor::new(generator, mod_item, args.unwrap)?;
         processor.generate()
     } else {
         Err(syn::Error::new(
@@ -400,12 +409,17 @@ fn resolve_spec_path(lit: &LitStr) -> syn::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Build TypeSpaceSettings and TypeOverrides from module attributes and items.
+/// Build TypeSpaceSettings, TypeOverrides, and schema renames from module attributes and items.
 fn build_type_settings(
     mod_item: &ItemMod,
-) -> syn::Result<(oxapi_impl::TypeSpaceSettings, oxapi_impl::TypeOverrides)> {
+) -> syn::Result<(
+    oxapi_impl::TypeSpaceSettings,
+    oxapi_impl::TypeOverrides,
+    std::collections::HashMap<String, String>,
+)> {
     let mut settings = oxapi_impl::TypeSpaceSettings::default();
     let mut overrides = oxapi_impl::TypeOverrides::new();
+    let mut schema_renames = std::collections::HashMap::new();
 
     // Parse #[convert(...)] attributes on the module
     for attr in find_convert_attrs(&mod_item.attrs)? {
@@ -422,9 +436,11 @@ fn build_type_settings(
                 syn::Item::Struct(s) => {
                     if let Some(rename) = find_rename_attr(&s.attrs)? {
                         match rename {
-                            RenameAttr::Schema(new_name) => {
-                                // Schema type rename: #[rename("NewName")] struct OldName;
-                                let original_name = s.ident.to_string();
+                            RenameAttr::Schema(original_name) => {
+                                // Schema type rename: #[rename("OriginalName")] struct NewName;
+                                // The attribute specifies the schema name from OpenAPI,
+                                // the struct ident is what it gets renamed to.
+                                let new_name = s.ident.to_string();
                                 let mut patch = oxapi_impl::TypeSpacePatch::default();
                                 patch.with_rename(&new_name);
 
@@ -434,6 +450,8 @@ fn build_type_settings(
                                 }
 
                                 settings.with_patch(&original_name, &patch);
+                                // Track the rename for type reference resolution
+                                schema_renames.insert(original_name, new_name);
                             }
                             RenameAttr::Operation(op) => {
                                 // Generated type rename: #[rename(get, "/path", ok)] struct NewName;
@@ -472,8 +490,11 @@ fn build_type_settings(
                             // Schema type replacement: #[replace] type Name = T;
                             let type_name = t.ident.to_string();
                             let replace_type = t.ty.to_token_stream().to_string();
-                            settings
-                                .with_replacement(&type_name, &replace_type, std::iter::empty());
+                            settings.with_replacement(
+                                &type_name,
+                                &replace_type,
+                                std::iter::empty(),
+                            );
                         }
                     }
                 }
@@ -483,12 +504,11 @@ fn build_type_settings(
         }
     }
 
-    Ok((settings, overrides))
+    Ok((settings, overrides, schema_renames))
 }
 
 /// Parsed macro arguments.
 struct MacroArgs {
-    framework: Framework,
     spec_path: LitStr,
     unwrap: bool,
     ok_suffix: String,
@@ -586,18 +606,15 @@ impl syn::parse::Parse for MacroArgs {
             }
         }
 
-        let framework = match framework.to_string().as_str() {
-            "axum" => Framework::Axum,
-            other => {
-                return Err(syn::Error::new(
-                    framework.span(),
-                    format!("unsupported framework: {}", other),
-                ));
-            }
-        };
+        // Only axum is supported for now
+        if framework.to_string().as_str() != "axum" {
+            return Err(syn::Error::new(
+                framework.span(),
+                format!("unsupported framework: {}", framework),
+            ));
+        }
 
         Ok(MacroArgs {
-            framework,
             spec_path,
             unwrap,
             ok_suffix: ok_suffix.unwrap_or_else(|| "Response".to_string()),
@@ -607,28 +624,16 @@ impl syn::parse::Parse for MacroArgs {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Framework {
-    Axum,
-}
-
 /// Processes a trait and generates the output.
 struct TraitProcessor {
     generator: oxapi_impl::Generator,
-    #[allow(dead_code)]
-    framework: Framework,
     trait_item: ItemTrait,
 }
 
 impl TraitProcessor {
-    fn new(
-        generator: oxapi_impl::Generator,
-        framework: Framework,
-        trait_item: ItemTrait,
-    ) -> syn::Result<Self> {
+    fn new(generator: oxapi_impl::Generator, trait_item: ItemTrait) -> syn::Result<Self> {
         Ok(Self {
             generator,
-            framework,
             trait_item,
         })
     }
@@ -756,8 +761,6 @@ impl TraitProcessor {
 /// Processes a module containing multiple traits.
 struct ModuleProcessor {
     generator: oxapi_impl::Generator,
-    #[allow(dead_code)]
-    framework: Framework,
     /// Module wrapper (visibility, name) - None if unwrap mode
     mod_wrapper: Option<(syn::Visibility, Ident)>,
     /// Module content items
@@ -765,12 +768,7 @@ struct ModuleProcessor {
 }
 
 impl ModuleProcessor {
-    fn new(
-        generator: oxapi_impl::Generator,
-        framework: Framework,
-        mod_item: ItemMod,
-        unwrap: bool,
-    ) -> syn::Result<Self> {
+    fn new(generator: oxapi_impl::Generator, mod_item: ItemMod, unwrap: bool) -> syn::Result<Self> {
         // Module must have content (not just a declaration)
         let (_, content) = mod_item.content.ok_or_else(|| {
             syn::Error::new(
@@ -787,7 +785,6 @@ impl ModuleProcessor {
 
         Ok(Self {
             generator,
-            framework,
             mod_wrapper,
             content,
         })

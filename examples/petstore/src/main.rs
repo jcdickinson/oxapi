@@ -9,7 +9,14 @@ use tokio::sync::RwLock;
 #[oxapi::oxapi(axum, "petstore.json")]
 mod petstore {
     #[rename(post, "/pet", ok)]
-    struct AddPetResponse;
+    #[derive(Debug, Clone)]
+    enum PetResponse {
+        #[status(200)]
+        Created,
+    }
+
+    #[rename("Pet")]
+    struct Animal;
 
     // Pet operations - generic over state type for dependency injection
     trait PetService<S: PetStateProvider> {
@@ -93,19 +100,19 @@ use petstore::{PetService, StoreService, UserService};
 
 // Trait for dependency injection of PetService state
 pub trait PetStateProvider: Clone + Send + Sync + 'static {
-    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Pet>>>;
+    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Animal>>>;
     fn next_id(&self) -> &Arc<RwLock<i64>>;
 }
 
 // Separate state structs for each service
 #[derive(Clone)]
 pub struct PetState {
-    pets: Arc<RwLock<HashMap<i64, Pet>>>,
+    pets: Arc<RwLock<HashMap<i64, Animal>>>,
     next_id: Arc<RwLock<i64>>,
 }
 
 impl PetStateProvider for PetState {
-    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Pet>>> {
+    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Animal>>> {
         &self.pets
     }
 
@@ -118,7 +125,7 @@ impl PetStateProvider for PetState {
 pub struct StoreState {
     orders: Arc<RwLock<HashMap<i64, Order>>>,
     // Reference to pets for inventory calculation
-    pets: Arc<RwLock<HashMap<i64, Pet>>>,
+    pets: Arc<RwLock<HashMap<i64, Animal>>>,
     next_id: Arc<RwLock<i64>>,
 }
 
@@ -144,8 +151,8 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn add_pet(
         State(state): State<S>,
-        Json(mut pet): Json<Pet>,
-    ) -> Result<AddPetResponse, AddPetError> {
+        Json(mut pet): Json<Animal>,
+    ) -> Result<PetResponse, AddPetError> {
         let id = if let Some(id) = pet.id {
             id
         } else {
@@ -157,12 +164,12 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
         pet.id = Some(id);
         state.pets().write().await.insert(id, pet.clone());
-        Ok(AddPetResponse::Status200(pet))
+        Ok(PetResponse::Created(pet))
     }
 
     async fn update_pet(
         State(state): State<S>,
-        Json(pet): Json<Pet>,
+        Json(pet): Json<Animal>,
     ) -> Result<UpdatePetResponse, UpdatePetError> {
         let id = pet.id.ok_or(UpdatePetError::Status400)?;
         let mut pets = state.pets().write().await;
@@ -186,7 +193,7 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
         Query(query): Query<FindPetsByStatusQuery>,
     ) -> Result<FindPetsByStatusResponse, FindPetsByStatusError> {
         let pets = state.pets().read().await;
-        let filtered: Vec<Pet> =
+        let filtered: Vec<Animal> =
             pets.values()
                 .filter(|pet| {
                     query.status.as_ref().is_none_or(|s| {
@@ -203,7 +210,7 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
         Query(query): Query<FindPetsByTagsQuery>,
     ) -> Result<FindPetsByTagsResponse, FindPetsByTagsError> {
         let pets = state.pets().read().await;
-        let filtered: Vec<Pet> = pets
+        let filtered: Vec<Animal> = pets
             .values()
             .filter(|pet| {
                 query.tags.as_ref().is_none_or(|tags| {
@@ -369,7 +376,9 @@ impl UserService for UserServiceImpl {
         let users = state.users.read().await;
         if let (Some(username), Some(_password)) = (&query.username, &query.password) {
             if users.contains_key(username) {
-                Ok(LoginUserResponse::Status200("session-token-12345".to_string()))
+                Ok(LoginUserResponse::Status200(
+                    "session-token-12345".to_string(),
+                ))
             } else {
                 Err(LoginUserError::Status400)
             }
@@ -378,7 +387,9 @@ impl UserService for UserServiceImpl {
         }
     }
 
-    async fn logout_user(State(_state): State<UserState>) -> Result<LogoutUserResponse, LogoutUserError> {
+    async fn logout_user(
+        State(_state): State<UserState>,
+    ) -> Result<LogoutUserResponse, LogoutUserError> {
         Ok(LogoutUserResponse::Status200)
     }
 
@@ -441,7 +452,7 @@ async fn main() {
         let mut pets = pet_state.pets.write().await;
         pets.insert(
             1,
-            Pet {
+            Animal {
                 id: Some(1),
                 name: "Doggie".to_string(),
                 photo_urls: vec!["https://example.com/doggie.jpg".to_string()],
@@ -458,7 +469,7 @@ async fn main() {
         );
         pets.insert(
             2,
-            Pet {
+            Animal {
                 id: Some(2),
                 name: "Cat".to_string(),
                 photo_urls: vec!["https://example.com/cat.jpg".to_string()],

@@ -62,7 +62,12 @@ impl<'a> ResponseGenerator<'a> {
     }
 
     /// Get the enum name, applying any rename override.
-    fn get_enum_name(&self, op: &Operation, default_name: &str, kind: GeneratedTypeKind) -> syn::Ident {
+    fn get_enum_name(
+        &self,
+        op: &Operation,
+        default_name: &str,
+        kind: GeneratedTypeKind,
+    ) -> syn::Ident {
         if let Some(TypeOverride::Rename { name, .. }) =
             self.overrides.get(op.method, &op.path, kind)
         {
@@ -74,24 +79,29 @@ impl<'a> ResponseGenerator<'a> {
 
     /// Get the variant name for a status code, applying any rename override.
     fn get_variant_name(&self, op: &Operation, status: u16, kind: GeneratedTypeKind) -> syn::Ident {
-        if let Some(TypeOverride::Rename { variant_overrides, .. }) =
-            self.overrides.get(op.method, &op.path, kind)
+        if let Some(TypeOverride::Rename {
+            variant_overrides, ..
+        }) = self.overrides.get(op.method, &op.path, kind)
+            && let Some(ov) = variant_overrides.get(&status)
         {
-            if let Some(ov) = variant_overrides.get(&status) {
-                return format_ident!("{}", ov.name);
-            }
+            return format_ident!("{}", ov.name);
         }
         format_ident!("Status{}", status)
     }
 
     /// Get the variant attributes for a status code.
-    fn get_variant_attrs(&self, op: &Operation, status: u16, kind: GeneratedTypeKind) -> Vec<TokenStream> {
-        if let Some(TypeOverride::Rename { variant_overrides, .. }) =
-            self.overrides.get(op.method, &op.path, kind)
+    fn get_variant_attrs(
+        &self,
+        op: &Operation,
+        status: u16,
+        kind: GeneratedTypeKind,
+    ) -> Vec<TokenStream> {
+        if let Some(TypeOverride::Rename {
+            variant_overrides, ..
+        }) = self.overrides.get(op.method, &op.path, kind)
+            && let Some(ov) = variant_overrides.get(&status)
         {
-            if let Some(ov) = variant_overrides.get(&status) {
-                return ov.attrs.clone();
-            }
+            return ov.attrs.clone();
         }
         Vec::new()
     }
@@ -291,12 +301,16 @@ impl<'a> ResponseGenerator<'a> {
             .iter()
             .map(|resp| {
                 let (variant_name, status, is_default) = match &resp.status_code {
-                    ResponseStatus::Code(code) => {
-                        (self.get_variant_name(op, *code, GeneratedTypeKind::Err), *code, false)
-                    }
-                    ResponseStatus::Default => {
-                        (self.get_default_variant_name(op, GeneratedTypeKind::Err), 500, true)
-                    }
+                    ResponseStatus::Code(code) => (
+                        self.get_variant_name(op, *code, GeneratedTypeKind::Err),
+                        *code,
+                        false,
+                    ),
+                    ResponseStatus::Default => (
+                        self.get_default_variant_name(op, GeneratedTypeKind::Err),
+                        500,
+                        true,
+                    ),
                 };
                 let variant_attrs = self.get_variant_attrs(op, status, GeneratedTypeKind::Err);
 

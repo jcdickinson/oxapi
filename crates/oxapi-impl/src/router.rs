@@ -7,14 +7,11 @@ use crate::Generator;
 use crate::openapi::HttpMethod;
 
 /// Generator for axum router code.
-pub struct RouterGenerator<'a> {
-    #[allow(dead_code)]
-    generator: &'a Generator,
-}
+pub struct RouterGenerator;
 
-impl<'a> RouterGenerator<'a> {
-    pub fn new(generator: &'a Generator) -> Self {
-        Self { generator }
+impl RouterGenerator {
+    pub fn new(_generator: &Generator) -> Self {
+        Self
     }
 
     /// Generate the body of the map_routes function.
@@ -26,11 +23,11 @@ impl<'a> RouterGenerator<'a> {
         }
 
         let routes = methods.iter().map(|(method_name, http_method, path)| {
-            let axum_path = convert_path_to_axum(path);
+            // OpenAPI and axum 0.8+ both use {param} format
             let method_fn = http_method_to_axum_fn(*http_method);
 
             quote! {
-                .route(#axum_path, ::axum::routing::#method_fn(Self::#method_name))
+                .route(#path, ::axum::routing::#method_fn(Self::#method_name))
             }
         });
 
@@ -39,15 +36,6 @@ impl<'a> RouterGenerator<'a> {
                 #(#routes)*
         }
     }
-}
-
-/// Convert an OpenAPI path to axum path format.
-///
-/// OpenAPI uses `{param}` and axum 0.8+ also uses `{param}`.
-/// Earlier axum versions used `:param` but 0.8 uses `{param}`.
-fn convert_path_to_axum(path: &str) -> String {
-    // OpenAPI and axum 0.8+ both use {param} format, so just pass through
-    path.to_string()
 }
 
 /// Get the axum routing function for an HTTP method.
@@ -64,27 +52,4 @@ fn http_method_to_axum_fn(method: HttpMethod) -> syn::Ident {
             HttpMethod::Options => "options",
         }
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_convert_path_simple() {
-        assert_eq!(convert_path_to_axum("/users"), "/users");
-    }
-
-    #[test]
-    fn test_convert_path_with_param() {
-        assert_eq!(convert_path_to_axum("/users/{id}"), "/users/{id}");
-    }
-
-    #[test]
-    fn test_convert_path_multiple_params() {
-        assert_eq!(
-            convert_path_to_axum("/users/{user_id}/posts/{post_id}"),
-            "/users/{user_id}/posts/{post_id}"
-        );
-    }
 }

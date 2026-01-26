@@ -37,36 +37,31 @@ impl<'a> MethodTransformer<'a> {
         let suffixes = self.generator.response_suffixes();
 
         // Get Ok type (may be renamed or replaced)
-        let ok_type: TokenStream =
-            match overrides.get(op.method, &op.path, GeneratedTypeKind::Ok) {
-                Some(TypeOverride::Rename { name, .. }) => {
-                    let ident = format_ident!("{}", name);
-                    quote! { #types_mod::#ident }
-                }
-                Some(TypeOverride::Replace(replacement)) => {
-                    replacement.clone()
-                }
-                None => {
-                    let ident = format_ident!("{}{}", op_name, suffixes.ok_suffix);
-                    quote! { #types_mod::#ident }
-                }
-            };
+        let ok_type: TokenStream = match overrides.get(op.method, &op.path, GeneratedTypeKind::Ok) {
+            Some(TypeOverride::Rename { name, .. }) => {
+                let ident = format_ident!("{}", name);
+                quote! { #types_mod::#ident }
+            }
+            Some(TypeOverride::Replace(replacement)) => replacement.clone(),
+            None => {
+                let ident = format_ident!("{}{}", op_name, suffixes.ok_suffix);
+                quote! { #types_mod::#ident }
+            }
+        };
 
         // Get Err type (may be renamed or replaced)
-        let err_type: TokenStream =
-            match overrides.get(op.method, &op.path, GeneratedTypeKind::Err) {
-                Some(TypeOverride::Rename { name, .. }) => {
-                    let ident = format_ident!("{}", name);
-                    quote! { #types_mod::#ident }
-                }
-                Some(TypeOverride::Replace(replacement)) => {
-                    replacement.clone()
-                }
-                None => {
-                    let ident = format_ident!("{}{}", op_name, suffixes.err_suffix);
-                    quote! { #types_mod::#ident }
-                }
-            };
+        let err_type: TokenStream = match overrides.get(op.method, &op.path, GeneratedTypeKind::Err)
+        {
+            Some(TypeOverride::Rename { name, .. }) => {
+                let ident = format_ident!("{}", name);
+                quote! { #types_mod::#ident }
+            }
+            Some(TypeOverride::Replace(replacement)) => replacement.clone(),
+            None => {
+                let ident = format_ident!("{}{}", op_name, suffixes.err_suffix);
+                quote! { #types_mod::#ident }
+            }
+        };
 
         // Transform each parameter, filling in type elisions
         let transformed_params = self.transform_params(method, op)?;

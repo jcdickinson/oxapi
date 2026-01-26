@@ -200,6 +200,14 @@ impl ParsedSpec {
     pub fn operations(&self) -> impl Iterator<Item = &Operation> {
         self.operations.iter()
     }
+
+    /// Get all schema names defined in the spec.
+    pub fn schema_names(&self) -> Vec<String> {
+        self.components
+            .as_ref()
+            .map(|c| c.schemas.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Load an OpenAPI spec from a file.

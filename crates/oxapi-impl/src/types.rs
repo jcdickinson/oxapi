@@ -16,9 +16,8 @@ use crate::{Error, GeneratedTypeKind, Result, TypeOverride, TypeOverrides};
 /// Type generator that wraps typify's TypeSpace.
 pub struct TypeGenerator {
     type_space: TypeSpace,
-    /// Map from schema reference to generated type name
-    #[allow(dead_code)]
-    type_names: HashMap<String, String>,
+    /// Map from original schema name to renamed name (both in PascalCase)
+    renames: HashMap<String, String>,
 }
 
 impl TypeGenerator {
@@ -49,8 +48,19 @@ impl TypeGenerator {
 
         Ok(Self {
             type_space,
-            type_names: HashMap::new(),
+            renames: HashMap::new(),
         })
+    }
+
+    /// Set the rename mappings (original name -> new name, both in original case from spec).
+    /// TypeSpaceSettings doesn't expose its patches for reverse lookup, so we track renames
+    /// separately to resolve type references correctly.
+    pub fn set_renames(&mut self, renames: HashMap<String, String>) {
+        // Convert to PascalCase for lookup
+        self.renames = renames
+            .into_iter()
+            .map(|(k, v)| (k.to_upper_camel_case(), v.to_upper_camel_case()))
+            .collect();
     }
 
     /// Generate all types as a TokenStream.
@@ -58,11 +68,18 @@ impl TypeGenerator {
         self.type_space.to_stream()
     }
 
-    /// Get the type name for a schema reference.
+    /// Get the type name for a schema reference, applying any renames.
     pub fn get_type_name(&self, reference: &str) -> Option<String> {
         // Extract the type name from the reference
         let name = reference.strip_prefix("#/components/schemas/")?;
-        Some(name.to_upper_camel_case())
+        let pascal_name = name.to_upper_camel_case();
+
+        // Check if this type has been renamed
+        if let Some(renamed) = self.renames.get(&pascal_name) {
+            Some(renamed.clone())
+        } else {
+            Some(pascal_name)
+        }
     }
 
     /// Generate a type for an inline schema.
@@ -159,7 +176,6 @@ impl TypeGenerator {
     }
 
     /// Get the type for a response body.
-    #[allow(dead_code)]
     pub fn response_type(
         &self,
         schema: &Option<ReferenceOr<Schema>>,

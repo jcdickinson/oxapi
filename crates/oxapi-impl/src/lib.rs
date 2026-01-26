@@ -162,7 +162,12 @@ impl TypeOverrides {
     }
 
     /// Get an override for a specific operation and kind.
-    pub fn get(&self, method: HttpMethod, path: &str, kind: GeneratedTypeKind) -> Option<&TypeOverride> {
+    pub fn get(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        kind: GeneratedTypeKind,
+    ) -> Option<&TypeOverride> {
         self.overrides.get(&TypeOverrideKey {
             method,
             path: path.to_string(),
@@ -195,6 +200,9 @@ pub enum Error {
 
     #[error("unsupported feature: {0}")]
     Unsupported(String),
+
+    #[error("unknown schema '{name}' in #[rename(\"{name}\")]. Available schemas: {available}")]
+    UnknownSchema { name: String, available: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -230,8 +238,26 @@ impl Generator {
         type_overrides: TypeOverrides,
         response_suffixes: ResponseSuffixes,
     ) -> Result<Self> {
+        Self::with_all_settings_and_renames(
+            spec,
+            settings,
+            type_overrides,
+            response_suffixes,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// Create a new generator with all settings including schema renames.
+    pub fn with_all_settings_and_renames(
+        spec: OpenAPI,
+        settings: TypeSpaceSettings,
+        type_overrides: TypeOverrides,
+        response_suffixes: ResponseSuffixes,
+        schema_renames: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
         let parsed = ParsedSpec::from_openapi(spec)?;
-        let type_gen = TypeGenerator::with_settings(&parsed, settings)?;
+        let mut type_gen = TypeGenerator::with_settings(&parsed, settings)?;
+        type_gen.set_renames(schema_renames);
 
         Ok(Self {
             spec: parsed,
@@ -263,8 +289,31 @@ impl Generator {
         type_overrides: TypeOverrides,
         response_suffixes: ResponseSuffixes,
     ) -> Result<Self> {
+        Self::from_file_with_all_settings_and_renames(
+            path,
+            settings,
+            type_overrides,
+            response_suffixes,
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// Load and parse an OpenAPI spec from a file path with all settings including schema renames.
+    pub fn from_file_with_all_settings_and_renames(
+        path: &std::path::Path,
+        settings: TypeSpaceSettings,
+        type_overrides: TypeOverrides,
+        response_suffixes: ResponseSuffixes,
+        schema_renames: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
         let spec = openapi::load_spec(path)?;
-        Self::with_all_settings(spec, settings, type_overrides, response_suffixes)
+        Self::with_all_settings_and_renames(
+            spec,
+            settings,
+            type_overrides,
+            response_suffixes,
+            schema_renames,
+        )
     }
 
     /// Get the parsed spec.
@@ -297,9 +346,9 @@ impl Generator {
     pub fn generate_query_structs(&self) -> TokenStream {
         let mut structs = Vec::new();
         for op in self.spec.operations() {
-            if let Some((_, definition)) =
-                self.type_gen
-                    .generate_query_struct(op, &self.type_overrides)
+            if let Some((_, definition)) = self
+                .type_gen
+                .generate_query_struct(op, &self.type_overrides)
             {
                 structs.push(definition);
             }
@@ -343,5 +392,21 @@ impl Generator {
         } else {
             Err(Error::MissingOperations(missing))
         }
+    }
+
+    /// Validate that all schema names used in renames exist in the spec.
+    pub fn validate_schema_names(&self, schema_names: &[String]) -> Result<()> {
+        let available = self.spec.schema_names();
+
+        for name in schema_names {
+            if !available.contains(name) {
+                return Err(Error::UnknownSchema {
+                    name: name.clone(),
+                    available: available.join(", "),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
