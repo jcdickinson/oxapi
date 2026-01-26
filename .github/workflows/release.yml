@@ -34,7 +34,12 @@ jobs:
 
       - name: Update version in Cargo.toml
         run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}" # Set by release workflow/' Cargo.toml
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update workspace package version
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'" # Set by release workflow/' Cargo.toml
+          # Update internal crate dependency versions
+          sed -i 's/\(oxapi-impl = {.*version = "\)[^"]*"/\1'"$VERSION"'"/' Cargo.toml
+          sed -i 's/\(oxapi-macro = {.*version = "\)[^"]*"/\1'"$VERSION"'"/' Cargo.toml
 
       - name: Verify build
         run: cargo build --all-targets

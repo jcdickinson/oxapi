@@ -12,7 +12,7 @@ proc-macro = true
 
 [dependencies]
 heck = { workspace = true } #unified
-oxapi-impl = { path = "../oxapi-impl" }
+oxapi-impl = { workspace = true }
 proc-macro2 = { workspace = true } #unified
 quote = { workspace = true } #unified
 syn = { workspace = true } #unified

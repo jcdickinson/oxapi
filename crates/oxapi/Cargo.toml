@@ -11,4 +11,4 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-oxapi-macro = { path = "../oxapi-macro" }
+oxapi-macro = { workspace = true }

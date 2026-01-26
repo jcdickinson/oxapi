@@ -20,3 +20,5 @@ serde = { version = "1.0", features = ["derive"] } #unified
 serde_json = "1.0" #unified
 syn = { version = "2.0", features = ["full", "parsing", "printing"] } #unified
 proc-macro2 = "1.0"
+oxapi-impl = { path = "crates/oxapi-impl", version = "0.1.0" }
+oxapi-macro = { path = "crates/oxapi-macro", version = "0.1.0" }
