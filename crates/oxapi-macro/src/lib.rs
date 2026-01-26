@@ -235,6 +235,10 @@ impl TraitProcessor {
             .filter(|a| !a.path().is_ident("oxapi"))
             .collect();
 
+        // Preserve generic parameters from the original trait
+        let generics = &self.trait_item.generics;
+        let where_clause = &generics.where_clause;
+
         let output = quote! {
             #vis mod #types_mod_name {
                 use super::*;
@@ -244,7 +248,7 @@ impl TraitProcessor {
             }
 
             #(#trait_attrs)*
-            #vis trait #trait_name: 'static {
+            #vis trait #trait_name #generics: 'static #where_clause {
                 #(#transformed_methods)*
             }
         };
@@ -429,9 +433,12 @@ impl ModuleProcessor {
             }
 
             // Traits in module are always pub (for external use)
+            // Preserve generic parameters from the original trait
+            let generics = &info.trait_item.generics;
+            let where_clause = &generics.where_clause;
             generated_traits.push(quote! {
                 #(#trait_attrs)*
-                pub trait #trait_name: 'static {
+                pub trait #trait_name #generics: 'static #where_clause {
                     #(#transformed_methods)*
                 }
             });

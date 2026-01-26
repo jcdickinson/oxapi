@@ -8,39 +8,39 @@ use tokio::sync::RwLock;
 // Module-based macro with split traits by responsibility
 #[oxapi::oxapi(axum, "petstore.json")]
 mod petstore {
-    // Pet operations
-    trait PetService {
+    // Pet operations - generic over state type for dependency injection
+    trait PetService<S: PetStateProvider> {
         #[oxapi(map)]
-        fn map_routes(router: Router<PetState>) -> Router<PetState>;
+        fn map_routes(router: Router<S>) -> Router<S>;
 
         #[oxapi(get, "/pet/{petId}")]
-        async fn get_pet_by_id(state: State<PetState>, pet_id: Path<_>);
+        async fn get_pet_by_id(state: State<S>, pet_id: Path<_>);
 
         #[oxapi(post, "/pet")]
-        async fn add_pet(state: State<PetState>, body: Json<_>);
+        async fn add_pet(state: State<S>, body: Json<_>);
 
         #[oxapi(put, "/pet")]
-        async fn update_pet(state: State<PetState>, body: Json<_>);
+        async fn update_pet(state: State<S>, body: Json<_>);
 
         #[oxapi(delete, "/pet/{petId}")]
-        async fn delete_pet(state: State<PetState>, pet_id: Path<_>);
+        async fn delete_pet(state: State<S>, pet_id: Path<_>);
 
         #[oxapi(get, "/pet/findByStatus")]
-        async fn find_pets_by_status(state: State<PetState>, query: Query<FindByStatusQuery>);
+        async fn find_pets_by_status(state: State<S>, query: Query<FindByStatusQuery>);
 
         #[oxapi(get, "/pet/findByTags")]
-        async fn find_pets_by_tags(state: State<PetState>, query: Query<FindByTagsQuery>);
+        async fn find_pets_by_tags(state: State<S>, query: Query<FindByTagsQuery>);
 
         #[oxapi(post, "/pet/{petId}")]
         async fn update_pet_with_form(
-            state: State<PetState>,
+            state: State<S>,
             pet_id: Path<_>,
             query: Query<UpdatePetWithFormQuery>,
         );
 
         #[oxapi(post, "/pet/{petId}/uploadImage")]
         async fn upload_file(
-            state: State<PetState>,
+            state: State<S>,
             pet_id: Path<_>,
             query: Query<UploadFileQuery>,
         );
@@ -96,11 +96,27 @@ mod petstore {
 use petstore::types::*;
 use petstore::{PetService, StoreService, UserService};
 
+// Trait for dependency injection of PetService state
+pub trait PetStateProvider: Clone + Send + Sync + 'static {
+    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Pet>>>;
+    fn next_id(&self) -> &Arc<RwLock<i64>>;
+}
+
 // Separate state structs for each service
 #[derive(Clone)]
 pub struct PetState {
     pets: Arc<RwLock<HashMap<i64, Pet>>>,
     next_id: Arc<RwLock<i64>>,
+}
+
+impl PetStateProvider for PetState {
+    fn pets(&self) -> &Arc<RwLock<HashMap<i64, Pet>>> {
+        &self.pets
+    }
+
+    fn next_id(&self) -> &Arc<RwLock<i64>> {
+        &self.next_id
+    }
 }
 
 #[derive(Clone)]
@@ -147,15 +163,15 @@ pub struct LoginQuery {
     pub password: Option<String>,
 }
 
-// Pet service implementation
+// Pet service implementation - generic over any state that provides pet data
 struct PetServiceImpl;
 
-impl PetService for PetServiceImpl {
+impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
     async fn get_pet_by_id(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Path(pet_id): Path<i64>,
     ) -> Result<GetPetByIdOk, GetPetByIdErr> {
-        let pets = state.pets.read().await;
+        let pets = state.pets().read().await;
         match pets.get(&pet_id) {
             Some(pet) => Ok(GetPetByIdOk::Status200(pet.clone())),
             None => Err(GetPetByIdErr::Status404),
@@ -163,29 +179,29 @@ impl PetService for PetServiceImpl {
     }
 
     async fn add_pet(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Json(mut pet): Json<Pet>,
     ) -> Result<AddPetOk, AddPetErr> {
         let id = if let Some(id) = pet.id {
             id
         } else {
-            let mut next_id = state.next_id.write().await;
+            let mut next_id = state.next_id().write().await;
             let id = *next_id;
             *next_id += 1;
             id
         };
 
         pet.id = Some(id);
-        state.pets.write().await.insert(id, pet.clone());
+        state.pets().write().await.insert(id, pet.clone());
         Ok(AddPetOk::Status200(pet))
     }
 
     async fn update_pet(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Json(pet): Json<Pet>,
     ) -> Result<UpdatePetOk, UpdatePetErr> {
         let id = pet.id.ok_or(UpdatePetErr::Status400)?;
-        let mut pets = state.pets.write().await;
+        let mut pets = state.pets().write().await;
         if !pets.contains_key(&id) {
             return Err(UpdatePetErr::Status404);
         }
@@ -194,18 +210,18 @@ impl PetService for PetServiceImpl {
     }
 
     async fn delete_pet(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Path(pet_id): Path<i64>,
     ) -> Result<DeletePetOk, DeletePetErr> {
-        state.pets.write().await.remove(&pet_id);
+        state.pets().write().await.remove(&pet_id);
         Ok(DeletePetOk::Status200)
     }
 
     async fn find_pets_by_status(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Query(query): Query<FindByStatusQuery>,
     ) -> Result<FindPetsByStatusOk, FindPetsByStatusErr> {
-        let pets = state.pets.read().await;
+        let pets = state.pets().read().await;
         let filtered: Vec<Pet> =
             pets.values()
                 .filter(|pet| {
@@ -219,10 +235,10 @@ impl PetService for PetServiceImpl {
     }
 
     async fn find_pets_by_tags(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Query(query): Query<FindByTagsQuery>,
     ) -> Result<FindPetsByTagsOk, FindPetsByTagsErr> {
-        let pets = state.pets.read().await;
+        let pets = state.pets().read().await;
         let filtered: Vec<Pet> = pets
             .values()
             .filter(|pet| {
@@ -237,11 +253,11 @@ impl PetService for PetServiceImpl {
     }
 
     async fn update_pet_with_form(
-        State(state): State<PetState>,
+        State(state): State<S>,
         Path(pet_id): Path<i64>,
         Query(query): Query<UpdatePetWithFormQuery>,
     ) -> Result<UpdatePetWithFormOk, UpdatePetWithFormErr> {
-        let mut pets = state.pets.write().await;
+        let mut pets = state.pets().write().await;
         if let Some(pet) = pets.get_mut(&pet_id) {
             if let Some(name) = query.name {
                 pet.name = name;
@@ -261,7 +277,7 @@ impl PetService for PetServiceImpl {
     }
 
     async fn upload_file(
-        State(_state): State<PetState>,
+        State(_state): State<S>,
         Path(_pet_id): Path<i64>,
         Query(_query): Query<UploadFileQuery>,
     ) -> Result<UploadFileOk, UploadFileErr> {
