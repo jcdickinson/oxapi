@@ -256,8 +256,7 @@ impl Generator {
         schema_renames: std::collections::HashMap<String, String>,
     ) -> Result<Self> {
         let parsed = ParsedSpec::from_openapi(spec)?;
-        let mut type_gen = TypeGenerator::with_settings(&parsed, settings)?;
-        type_gen.set_renames(schema_renames);
+        let type_gen = TypeGenerator::with_settings(&parsed, settings, schema_renames)?;
 
         Ok(Self {
             spec: parsed,
@@ -394,19 +393,4 @@ impl Generator {
         }
     }
 
-    /// Validate that all schema names used in renames exist in the spec.
-    pub fn validate_schema_names(&self, schema_names: &[String]) -> Result<()> {
-        let available = self.spec.schema_names();
-
-        for name in schema_names {
-            if !available.contains(name) {
-                return Err(Error::UnknownSchema {
-                    name: name.clone(),
-                    available: available.join(", "),
-                });
-            }
-        }
-
-        Ok(())
-    }
 }

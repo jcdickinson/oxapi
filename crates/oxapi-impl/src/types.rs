@@ -14,21 +14,39 @@ use crate::openapi::{Operation, OperationParam, ParamLocation, ParsedSpec, Reque
 use crate::{Error, GeneratedTypeKind, Result, TypeOverride, TypeOverrides};
 
 /// Type generator that wraps typify's TypeSpace.
+///
+/// Uses a two-pass approach:
+/// 1. Pass 1: Generate all types (component schemas + auto-generated types)
+/// 2. Pass 2: Generate code that references types using the registry built in Pass 1
 pub struct TypeGenerator {
     type_space: TypeSpace,
-    /// Map from original schema name to renamed name (both in PascalCase)
-    renames: HashMap<String, String>,
+    /// Map from schema name (as in OpenAPI spec) to final type name (after typify processing)
+    schema_to_type: HashMap<String, String>,
 }
 
 impl TypeGenerator {
     /// Create a new type generator from a parsed spec with default settings.
     pub fn new(spec: &ParsedSpec) -> Result<Self> {
-        Self::with_settings(spec, TypeSpaceSettings::default())
+        Self::with_settings(spec, TypeSpaceSettings::default(), HashMap::new())
     }
 
-    /// Create a new type generator from a parsed spec with custom settings.
-    pub fn with_settings(spec: &ParsedSpec, settings: TypeSpaceSettings) -> Result<Self> {
+    /// Create a new type generator from a parsed spec with custom settings and renames.
+    ///
+    /// The renames map should contain original schema name -> new name mappings.
+    /// These must match the patches configured in TypeSpaceSettings.
+    pub fn with_settings(
+        spec: &ParsedSpec,
+        settings: TypeSpaceSettings,
+        renames: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut type_space = TypeSpace::new(&settings);
+
+        // Collect schema names before adding to type space
+        let schema_names: Vec<String> = spec
+            .components
+            .as_ref()
+            .map(|c| c.schemas.keys().cloned().collect())
+            .unwrap_or_default();
 
         // Add all component schemas to the type space
         if let Some(components) = &spec.components {
@@ -46,21 +64,45 @@ impl TypeGenerator {
                 .map_err(|e| Error::TypeGenError(e.to_string()))?;
         }
 
+        // First validate that all renames reference schemas that exist in the spec
+        for original_name in renames.keys() {
+            if !schema_names.contains(original_name) {
+                return Err(Error::UnknownSchema {
+                    name: original_name.clone(),
+                    available: schema_names.join(", "),
+                });
+            }
+        }
+
+        // Build schema_to_type map by iterating TypeSpace to see what names typify generated
+        let generated_names: std::collections::HashSet<String> =
+            type_space.iter_types().map(|t| t.name()).collect();
+
+        let mut schema_to_type = HashMap::new();
+        for schema_name in &schema_names {
+            // Check if there's a rename for this schema
+            let expected_name = if let Some(renamed) = renames.get(schema_name) {
+                renamed.to_upper_camel_case()
+            } else {
+                schema_name.to_upper_camel_case()
+            };
+
+            // Verify the type exists in TypeSpace
+            if generated_names.contains(&expected_name) {
+                schema_to_type.insert(schema_name.clone(), expected_name);
+            } else {
+                // Type doesn't exist - this shouldn't happen if typify is working correctly
+                return Err(Error::TypeGenError(format!(
+                    "typify did not generate expected type '{}' for schema '{}'",
+                    expected_name, schema_name
+                )));
+            }
+        }
+
         Ok(Self {
             type_space,
-            renames: HashMap::new(),
+            schema_to_type,
         })
-    }
-
-    /// Set the rename mappings (original name -> new name, both in original case from spec).
-    /// TypeSpaceSettings doesn't expose its patches for reverse lookup, so we track renames
-    /// separately to resolve type references correctly.
-    pub fn set_renames(&mut self, renames: HashMap<String, String>) {
-        // Convert to PascalCase for lookup
-        self.renames = renames
-            .into_iter()
-            .map(|(k, v)| (k.to_upper_camel_case(), v.to_upper_camel_case()))
-            .collect();
     }
 
     /// Generate all types as a TokenStream.
@@ -68,18 +110,19 @@ impl TypeGenerator {
         self.type_space.to_stream()
     }
 
-    /// Get the type name for a schema reference, applying any renames.
+    /// Get the type name for a schema reference.
+    /// Returns the actual name from TypeSpace (after any renames applied by typify).
     pub fn get_type_name(&self, reference: &str) -> Option<String> {
-        // Extract the type name from the reference
-        let name = reference.strip_prefix("#/components/schemas/")?;
-        let pascal_name = name.to_upper_camel_case();
+        // Extract the schema name from the reference
+        let schema_name = reference.strip_prefix("#/components/schemas/")?;
 
-        // Check if this type has been renamed
-        if let Some(renamed) = self.renames.get(&pascal_name) {
-            Some(renamed.clone())
-        } else {
-            Some(pascal_name)
-        }
+        // Look up in our map (built from TypeSpace)
+        self.schema_to_type.get(schema_name).cloned()
+    }
+
+    /// Get all schema names and their corresponding type names.
+    pub fn schema_type_map(&self) -> &HashMap<String, String> {
+        &self.schema_to_type
     }
 
     /// Generate a type for an inline schema.

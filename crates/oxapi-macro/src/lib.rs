@@ -369,10 +369,8 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
         // Parse convert attributes from module and build settings
         let (settings, overrides, schema_renames) = build_type_settings(&mod_item)?;
 
-        // Collect schema names for validation
-        let schema_names_to_validate: Vec<String> = schema_renames.keys().cloned().collect();
-
         // Load the OpenAPI spec with custom settings
+        // Validation of schema renames happens during TypeGenerator construction
         let spec_path = resolve_spec_path(&args.spec_path)?;
         let generator = oxapi_impl::Generator::from_file_with_all_settings_and_renames(
             &spec_path,
@@ -382,13 +380,8 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
             schema_renames,
         )
         .map_err(|e| {
-            syn::Error::new(args.spec_path.span(), format!("failed to load spec: {}", e))
+            syn::Error::new(args.spec_path.span(), format!("{}", e))
         })?;
-
-        // Validate that all schema names used in renames exist
-        generator
-            .validate_schema_names(&schema_names_to_validate)
-            .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), e.to_string()))?;
 
         let processor = ModuleProcessor::new(generator, mod_item, args.unwrap)?;
         processor.generate()
