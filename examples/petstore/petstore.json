@@ -920,6 +920,26 @@
         }
       }
     },
+    "/spec": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Get OpenAPI specification.",
+        "description": "Returns the OpenAPI specification for this API.",
+        "operationId": "getSpec",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/user/{username}": {
       "get": {
         "tags": ["user"],

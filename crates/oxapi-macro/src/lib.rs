@@ -112,6 +112,22 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// async fn add_pet(state: State<S>, body: Json<_>);
 /// ```
 ///
+/// ## `#[oxapi(spec, "endpoint_path")]`
+///
+/// Serves the embedded OpenAPI spec at the given endpoint path. The method must be completely bare
+/// (no parameters, no return type, not async, no generics). The macro generates:
+/// - A method that returns `&'static str` containing the spec contents via `include_str!`
+/// - A GET route at the specified path (added to `map_routes`)
+///
+/// This endpoint does not appear in the OpenAPI spec itself but can be used for validation purposes.
+///
+/// ```ignore
+/// #[oxapi(spec, "/openapi.yaml")]
+/// fn spec();
+/// // Generates: fn spec() -> &'static str { include_str!("path/to/spec.yaml") }
+/// // And adds: .route("/openapi.yaml", get(|| async { Self::spec() }))
+/// ```
+///
 /// # Type Elision
 ///
 /// Use `_` as a type parameter to have the macro infer the correct type from the OpenAPI spec:
@@ -383,7 +399,7 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
             .map_err(|e| {
                 syn::Error::new(args.spec_path.span(), format!("failed to load spec: {}", e))
             })?;
-        let processor = TraitProcessor::new(generator, trait_item)?;
+        let processor = TraitProcessor::new(generator, trait_item, spec_path)?;
         processor.generate()
     } else if let Ok(mod_item) = syn::parse2::<ItemMod>(item) {
         // Parse convert attributes from module and build settings
@@ -415,7 +431,7 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
                 syn::Error::new(args.spec_path.span(), format!("{}", e))
             })?;
 
-        let processor = ModuleProcessor::new(generator, mod_item, args.unwrap)?;
+        let processor = ModuleProcessor::new(generator, mod_item, args.unwrap, spec_path)?;
         processor.generate()
     } else {
         Err(syn::Error::new(
@@ -676,13 +692,20 @@ impl syn::parse::Parse for MacroArgs {
 struct TraitProcessor {
     generator: oxapi_impl::Generator,
     trait_item: ItemTrait,
+    /// Resolved path to the spec file for include_str!
+    spec_path: std::path::PathBuf,
 }
 
 impl TraitProcessor {
-    fn new(generator: oxapi_impl::Generator, trait_item: ItemTrait) -> syn::Result<Self> {
+    fn new(
+        generator: oxapi_impl::Generator,
+        trait_item: ItemTrait,
+        spec_path: std::path::PathBuf,
+    ) -> syn::Result<Self> {
         Ok(Self {
             generator,
             trait_item,
+            spec_path,
         })
     }
 
@@ -698,6 +721,7 @@ impl TraitProcessor {
         // Parse all method attributes and collect coverage info
         let mut covered: HashMap<(oxapi_impl::HttpMethod, String), ()> = HashMap::new();
         let mut map_method: Option<&syn::TraitItemFn> = None;
+        let mut spec_method: Option<(&syn::TraitItemFn, String)> = None;
         let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
             Vec::new();
 
@@ -714,6 +738,12 @@ impl TraitProcessor {
                         } => {
                             covered.insert((http_method, path.clone()), ());
                             handler_methods.push((method, http_method, path));
+                        }
+                        OxapiAttr::Spec { path } => {
+                            validate_bare_spec_method(method)?;
+                            // Spec routes count as GET coverage if the path exists in OpenAPI
+                            covered.insert((oxapi_impl::HttpMethod::Get, path.clone()), ());
+                            spec_method = Some((method, path));
                         }
                     }
                 } else {
@@ -745,6 +775,9 @@ impl TraitProcessor {
                     .iter()
                     .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
                     .collect::<Vec<_>>(),
+                spec_method
+                    .as_ref()
+                    .map(|(m, path)| (m.sig.ident.clone(), path.clone())),
             );
 
             let sig = &map_fn.sig;
@@ -771,6 +804,17 @@ impl TraitProcessor {
 
             let transformed = method_transformer.transform(method, op)?;
             transformed_methods.push(transformed);
+        }
+
+        // Generate spec method if present
+        if let Some((method, _endpoint_path)) = &spec_method {
+            let method_name = &method.sig.ident;
+            let spec_file_path = self.spec_path.to_string_lossy();
+            transformed_methods.push(quote! {
+                fn #method_name() -> &'static str {
+                    include_str!(#spec_file_path)
+                }
+            });
         }
 
         // Generate the full output
@@ -819,10 +863,17 @@ struct ModuleProcessor {
     content: Vec<syn::Item>,
     /// Module span for error reporting
     mod_span: proc_macro2::Span,
+    /// Resolved path to the spec file for include_str!
+    spec_path: std::path::PathBuf,
 }
 
 impl ModuleProcessor {
-    fn new(generator: oxapi_impl::Generator, mod_item: ItemMod, unwrap: bool) -> syn::Result<Self> {
+    fn new(
+        generator: oxapi_impl::Generator,
+        mod_item: ItemMod,
+        unwrap: bool,
+        spec_path: std::path::PathBuf,
+    ) -> syn::Result<Self> {
         // Module must have content (not just a declaration)
         let mod_span = mod_item.ident.span();
         let (_, content) = mod_item.content.ok_or_else(|| {
@@ -843,6 +894,7 @@ impl ModuleProcessor {
             mod_wrapper,
             content,
             mod_span,
+            spec_path,
         })
     }
 
@@ -880,6 +932,7 @@ impl ModuleProcessor {
         struct TraitInfo<'a> {
             trait_item: &'a ItemTrait,
             map_method: Option<&'a syn::TraitItemFn>,
+            spec_method: Option<(&'a syn::TraitItemFn, String)>,
             handler_methods: Vec<(&'a syn::TraitItemFn, oxapi_impl::HttpMethod, String)>,
         }
 
@@ -887,6 +940,7 @@ impl ModuleProcessor {
 
         for trait_item in &traits {
             let mut map_method: Option<&syn::TraitItemFn> = None;
+            let mut spec_method: Option<(&syn::TraitItemFn, String)> = None;
             let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
                 Vec::new();
 
@@ -915,6 +969,12 @@ impl ModuleProcessor {
                                 all_covered.insert(key, ());
                                 handler_methods.push((method, http_method, path));
                             }
+                            OxapiAttr::Spec { path } => {
+                                validate_bare_spec_method(method)?;
+                                // Spec routes count as GET coverage if the path exists in OpenAPI
+                                all_covered.insert((oxapi_impl::HttpMethod::Get, path.clone()), ());
+                                spec_method = Some((method, path));
+                            }
                         }
                     } else {
                         return Err(syn::Error::new_spanned(
@@ -928,6 +988,7 @@ impl ModuleProcessor {
             trait_infos.push(TraitInfo {
                 trait_item,
                 map_method,
+                spec_method,
                 handler_methods,
             });
         }
@@ -969,6 +1030,9 @@ impl ModuleProcessor {
                         .iter()
                         .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
                         .collect::<Vec<_>>(),
+                    info.spec_method
+                        .as_ref()
+                        .map(|(m, path)| (m.sig.ident.clone(), path.clone())),
                 );
 
                 let sig = &map_fn.sig;
@@ -993,6 +1057,17 @@ impl ModuleProcessor {
 
                 let transformed = method_transformer.transform(method, op)?;
                 transformed_methods.push(transformed);
+            }
+
+            // Generate spec method if present
+            if let Some((method, _endpoint_path)) = &info.spec_method {
+                let method_name = &method.sig.ident;
+                let spec_file_path = self.spec_path.to_string_lossy();
+                transformed_methods.push(quote! {
+                    fn #method_name() -> &'static str {
+                        include_str!(#spec_file_path)
+                    }
+                });
             }
 
             // Traits in module are always pub (for external use)
@@ -1053,6 +1128,9 @@ enum OxapiAttr {
         method: oxapi_impl::HttpMethod,
         path: String,
     },
+    /// Spec endpoint: `#[oxapi(spec, "/openapi.yaml")]`
+    /// Returns the embedded spec contents at the given path.
+    Spec { path: String },
 }
 
 impl syn::parse::Parse for OxapiAttr {
@@ -1061,6 +1139,11 @@ impl syn::parse::Parse for OxapiAttr {
 
         match ident.to_string().as_str() {
             "map" => Ok(OxapiAttr::Map),
+            "spec" => {
+                input.parse::<Token![,]>()?;
+                let path: LitStr = input.parse()?;
+                Ok(OxapiAttr::Spec { path: path.value() })
+            }
             _ => {
                 let method = parse_http_method(&ident)?;
                 input.parse::<Token![,]>()?;
@@ -1088,6 +1171,43 @@ fn parse_http_method(ident: &Ident) -> syn::Result<oxapi_impl::HttpMethod> {
             format!("unknown HTTP method: {}", other),
         )),
     }
+}
+
+/// Validate that a spec method is completely bare: no parameters, no return type, not async.
+fn validate_bare_spec_method(method: &syn::TraitItemFn) -> syn::Result<()> {
+    // Check for async
+    if method.sig.asyncness.is_some() {
+        return Err(syn::Error::new_spanned(
+            method.sig.asyncness,
+            "spec method must not be async",
+        ));
+    }
+
+    // Check for parameters
+    if !method.sig.inputs.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &method.sig.inputs,
+            "spec method must have no parameters",
+        ));
+    }
+
+    // Check for return type
+    if !matches!(method.sig.output, syn::ReturnType::Default) {
+        return Err(syn::Error::new_spanned(
+            &method.sig.output,
+            "spec method must have no return type (it will be generated)",
+        ));
+    }
+
+    // Check for generics
+    if !method.sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &method.sig.generics,
+            "spec method must not have generics",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Parsed #[convert(into = Type, type = "...", format = "...")] attribute.

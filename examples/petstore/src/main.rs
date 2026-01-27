@@ -31,6 +31,10 @@ mod petstore {
         #[oxapi(map)]
         fn map_routes(router: Router<S>) -> Router<S>;
 
+        // Spec route that's Rust-only (not in OpenAPI spec)
+        #[oxapi(spec, "/openapi.json")]
+        fn openapi_spec();
+
         #[oxapi(get, "/pet/{petId}")]
         async fn get_pet_by_id(state: State<S>, pet_id: Path<_>);
 
@@ -60,6 +64,10 @@ mod petstore {
     trait StoreService {
         #[oxapi(map)]
         fn map_routes(router: Router<StoreState>) -> Router<StoreState>;
+
+        // Spec route that IS in the OpenAPI spec (for validation/discovery)
+        #[oxapi(spec, "/spec")]
+        fn spec();
 
         #[oxapi(get, "/store/inventory")]
         async fn get_inventory(state: State<StoreState>);
@@ -522,7 +530,10 @@ async fn main() {
     println!("  curl http://localhost:3000/store/inventory");
     println!("  curl http://localhost:3000/user/testuser");
     println!("  curl -X POST http://localhost:3000/pet -H 'Content-Type: application/json' \\");
-    println!("       -d '{{\"name\":\"Bird\",\"photoUrls\":[]}}'");
+    println!("       -d '{{\"name\":\"Bird\",\"photoUrls\":[]}}'\n");
+    println!("Spec endpoints:");
+    println!("  curl http://localhost:3000/openapi.json  # Rust-only (not in OpenAPI spec)");
+    println!("  curl http://localhost:3000/spec          # Defined in OpenAPI spec");
 
     axum::serve(listener, app).await.unwrap();
 }
