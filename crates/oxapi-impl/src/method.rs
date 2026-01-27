@@ -1,5 +1,6 @@
 //! Method transformation for trait methods.
 
+use openapiv3::{ReferenceOr, SchemaKind, Type as OapiType};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, GenericArgument, PathArguments, Type};
@@ -171,8 +172,29 @@ impl<'a> MethodTransformer<'a> {
                         // Fill in request body type
                         let inner = self.get_or_infer_inner(&last_segment.arguments, || {
                             if let Some(body) = &op.request_body {
-                                let op_name = op.operation_id.as_deref().unwrap_or(&op.path);
-                                type_gen.request_body_type(body, op_name)
+                                if let Some(schema) = &body.schema {
+                                    let op_name = op.operation_id.as_deref().unwrap_or(&op.path);
+                                    let body_type = type_gen.request_body_type(body, op_name);
+
+                                    // Check if this type needs to be prefixed with the types module.
+                                    // References to component schemas and inline objects need prefixing
+                                    // because their types are generated in the types module.
+                                    let needs_prefix = match schema {
+                                        ReferenceOr::Reference { .. } => true,
+                                        ReferenceOr::Item(inline) => matches!(
+                                            &inline.schema_kind,
+                                            SchemaKind::Type(OapiType::Object(_))
+                                        ),
+                                    };
+
+                                    if needs_prefix {
+                                        quote! { #types_mod::#body_type }
+                                    } else {
+                                        body_type
+                                    }
+                                } else {
+                                    quote! { serde_json::Value }
+                                }
                             } else {
                                 quote! { serde_json::Value }
                             }
