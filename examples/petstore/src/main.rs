@@ -15,7 +15,7 @@ mod petstore {
         Created,
     }
 
-    #[oxapi("Pet")]
+    #[oxapi(Pet)]
     struct Animal;
 
     // Example: Rename inline response type using variant syntax

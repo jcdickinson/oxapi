@@ -206,7 +206,7 @@ pub enum Error {
     #[error("unsupported feature: {0}")]
     Unsupported(String),
 
-    #[error("unknown schema '{name}' in #[rename(\"{name}\")]. Available schemas: {available}")]
+    #[error("unknown schema '{name}'. Available schemas: {available}")]
     UnknownSchema { name: String, available: String },
 }
 

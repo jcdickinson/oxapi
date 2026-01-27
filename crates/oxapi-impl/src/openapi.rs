@@ -124,6 +124,11 @@ impl Operation {
             .unwrap_or(&self.path)
             .to_upper_camel_case()
     }
+
+    /// Check if this operation has any error responses defined (4xx, 5xx, or default).
+    pub fn has_error_responses(&self) -> bool {
+        self.responses.iter().any(|r| r.status_code.is_error())
+    }
 }
 
 /// Request body information.

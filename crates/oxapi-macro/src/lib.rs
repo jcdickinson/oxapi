@@ -5,7 +5,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{ToTokens, quote};
+use quote::{ToTokens, quote, quote_spanned};
 use schemars::schema::{InstanceType, SchemaObject, SingleOrVec};
 use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 
@@ -176,11 +176,11 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// #[oxapi(axum, "spec.json")]
 /// mod api {
 ///     // Rename "Veggie" from the schema to "Vegetable" in generated code
-///     #[oxapi("Veggie")]
+///     #[oxapi(Veggie)]
 ///     struct Vegetable;
 ///
 ///     // Add extra derives to a schema type
-///     #[oxapi("Veggie")]
+///     #[oxapi(Veggie)]
 ///     #[derive(schemars::JsonSchema, PartialEq, Eq, Hash)]
 ///     struct Vegetable;
 /// }
@@ -308,7 +308,7 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// #[convert(into = uuid::Uuid, type = "string", format = "uuid")]
 /// mod api {
 ///     // Rename a schema type (Pet from OpenAPI becomes Animal in Rust)
-///     #[oxapi("Pet")]
+///     #[oxapi(Pet)]
 ///     #[derive(Clone)]
 ///     struct Animal;
 ///
@@ -389,6 +389,12 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
         // Parse convert attributes from module and build settings
         let (settings, overrides, schema_renames) = build_type_settings(&mod_item)?;
 
+        // Convert to HashMap<String, String> for the generator (original_name -> new_name)
+        let schema_renames_for_gen: std::collections::HashMap<String, String> = schema_renames
+            .iter()
+            .map(|(k, rename)| (k.clone(), rename.new.to_string()))
+            .collect();
+
         // Load the OpenAPI spec with custom settings
         // Validation of schema renames happens during TypeGenerator construction
         let spec_path = resolve_spec_path(&args.spec_path)?;
@@ -397,9 +403,17 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
             .settings(settings)
             .type_overrides(overrides)
             .response_suffixes(response_suffixes)
-            .schema_renames(schema_renames)
+            .schema_renames(schema_renames_for_gen)
             .build()
-            .map_err(|e| syn::Error::new(args.spec_path.span(), format!("{}", e)))?;
+            .map_err(|e| {
+                // Check if this is an UnknownSchema error and use the span from the original ident
+                if let oxapi_impl::Error::UnknownSchema { ref name, .. } = e
+                    && let Some(rename) = schema_renames.get(name)
+                {
+                    return syn::Error::new(rename.original.span(), format!("{}", e));
+                }
+                syn::Error::new(args.spec_path.span(), format!("{}", e))
+            })?;
 
         let processor = ModuleProcessor::new(generator, mod_item, args.unwrap)?;
         processor.generate()
@@ -420,13 +434,19 @@ fn resolve_spec_path(lit: &LitStr) -> syn::Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// Rename tracking original and new tokens for name resolution and error reporting.
+struct Rename<T> {
+    original: T,
+    new: T,
+}
+
 /// Build TypeSpaceSettings, TypeOverrides, and schema renames from module attributes and items.
 fn build_type_settings(
     mod_item: &ItemMod,
 ) -> syn::Result<(
     oxapi_impl::TypeSpaceSettings,
     oxapi_impl::TypeOverrides,
-    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, Rename<Ident>>,
 )> {
     let mut settings = oxapi_impl::TypeSpaceSettings::default();
     let mut overrides = oxapi_impl::TypeOverrides::new();
@@ -447,10 +467,11 @@ fn build_type_settings(
                 syn::Item::Struct(s) => {
                     if let Some(oxapi_attr) = find_struct_oxapi_attr(&s.attrs)? {
                         match oxapi_attr {
-                            StructOxapiAttr::Schema(original_name) => {
-                                // Schema type rename: #[oxapi("OriginalName")] struct NewName;
+                            StructOxapiAttr::Schema(original_ident) => {
+                                // Schema type rename: #[oxapi(OriginalName)] struct NewName;
                                 // The attribute specifies the schema name from OpenAPI,
                                 // the struct ident is what it gets renamed to.
+                                let original_name = original_ident.to_string();
                                 let new_name = s.ident.to_string();
                                 let mut patch = oxapi_impl::TypeSpacePatch::default();
                                 patch.with_rename(&new_name);
@@ -461,12 +482,22 @@ fn build_type_settings(
                                 }
 
                                 settings.with_patch(&original_name, &patch);
-                                // Track the rename for type reference resolution
-                                schema_renames.insert(original_name, new_name);
+                                schema_renames.insert(
+                                    original_name,
+                                    Rename {
+                                        original: original_ident,
+                                        new: s.ident.clone(),
+                                    },
+                                );
                             }
                             StructOxapiAttr::Operation(op) => {
                                 // Generated type rename: #[oxapi(get, "/path", ok)] struct NewName;
-                                overrides.add_rename(op.method, op.path, op.kind, s.ident.clone());
+                                overrides.add_rename(
+                                    op.method,
+                                    op.path.value(),
+                                    op.kind,
+                                    s.ident.clone(),
+                                );
                             }
                         }
                     }
@@ -479,7 +510,7 @@ fn build_type_settings(
                         let variant_overrides = parse_variant_overrides(&e.variants)?;
                         overrides.add_rename_with_overrides(
                             op.method,
-                            op.path,
+                            op.path.value(),
                             op.kind,
                             e.ident.clone(),
                             attrs,
@@ -495,7 +526,12 @@ fn build_type_settings(
                             TypeAliasOxapiAttr::Operation(op) => {
                                 // Generated type replacement: #[oxapi(get, "/path", ok)] type _ = T;
                                 let replacement = t.ty.to_token_stream();
-                                overrides.add_replace(op.method, op.path, op.kind, replacement);
+                                overrides.add_replace(
+                                    op.method,
+                                    op.path.value(),
+                                    op.kind,
+                                    replacement,
+                                );
                             }
                             TypeAliasOxapiAttr::Schema => {
                                 // Schema type replacement: #[oxapi] type Name = T;
@@ -750,6 +786,14 @@ impl TraitProcessor {
         let generics = &self.trait_item.generics;
         let where_clause = &generics.where_clause;
 
+        // Use trait name span so errors point to user's trait definition
+        let trait_def = quote_spanned! { trait_name.span() =>
+            #(#trait_attrs)*
+            #vis trait #trait_name #generics: 'static #where_clause {
+                #(#transformed_methods)*
+            }
+        };
+
         let output = quote! {
             #vis mod #types_mod_name {
                 use super::*;
@@ -759,10 +803,7 @@ impl TraitProcessor {
                 #query_structs
             }
 
-            #(#trait_attrs)*
-            #vis trait #trait_name #generics: 'static #where_clause {
-                #(#transformed_methods)*
-            }
+            #trait_def
         };
 
         Ok(output)
@@ -776,14 +817,17 @@ struct ModuleProcessor {
     mod_wrapper: Option<(syn::Visibility, Ident)>,
     /// Module content items
     content: Vec<syn::Item>,
+    /// Module span for error reporting
+    mod_span: proc_macro2::Span,
 }
 
 impl ModuleProcessor {
     fn new(generator: oxapi_impl::Generator, mod_item: ItemMod, unwrap: bool) -> syn::Result<Self> {
         // Module must have content (not just a declaration)
+        let mod_span = mod_item.ident.span();
         let (_, content) = mod_item.content.ok_or_else(|| {
             syn::Error::new(
-                proc_macro2::Span::call_site(),
+                mod_span,
                 "module must have inline content, not just a declaration",
             )
         })?;
@@ -798,6 +842,7 @@ impl ModuleProcessor {
             generator,
             mod_wrapper,
             content,
+            mod_span,
         })
     }
 
@@ -823,7 +868,7 @@ impl ModuleProcessor {
 
         if traits.is_empty() {
             return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
+                self.mod_span,
                 "module must contain at least one trait",
             ));
         }
@@ -890,7 +935,7 @@ impl ModuleProcessor {
         // Validate coverage against spec
         self.generator
             .validate_coverage(&all_covered)
-            .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), e.to_string()))?;
+            .map_err(|e| syn::Error::new(self.mod_span, e.to_string()))?;
 
         // Generate shared types module
         let types = self.generator.generate_types();
@@ -954,7 +999,8 @@ impl ModuleProcessor {
             // Preserve generic parameters from the original trait
             let generics = &info.trait_item.generics;
             let where_clause = &generics.where_clause;
-            generated_traits.push(quote! {
+            // Use trait name span so errors point to user's trait definition
+            generated_traits.push(quote_spanned! { trait_name.span() =>
                 #(#trait_attrs)*
                 pub trait #trait_name #generics: 'static #where_clause {
                     #(#transformed_methods)*
@@ -1047,15 +1093,15 @@ fn parse_http_method(ident: &Ident) -> syn::Result<oxapi_impl::HttpMethod> {
 /// Parsed #[convert(into = Type, type = "...", format = "...")] attribute.
 struct ConvertAttr {
     into: syn::Type,
-    type_field: Option<String>,
-    format: Option<String>,
+    type_field: Option<LitStr>,
+    format: Option<LitStr>,
 }
 
 impl syn::parse::Parse for ConvertAttr {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut into: Option<syn::Type> = None;
-        let mut type_field: Option<String> = None;
-        let mut format: Option<String> = None;
+        let mut type_field: Option<LitStr> = None;
+        let mut format: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1066,12 +1112,10 @@ impl syn::parse::Parse for ConvertAttr {
                     into = Some(input.parse()?);
                 }
                 "type" => {
-                    let lit: LitStr = input.parse()?;
-                    type_field = Some(lit.value());
+                    type_field = Some(input.parse()?);
                 }
                 "format" => {
-                    let lit: LitStr = input.parse()?;
-                    format = Some(lit.value());
+                    format = Some(input.parse()?);
                 }
                 other => {
                     return Err(syn::Error::new(
@@ -1101,7 +1145,7 @@ impl ConvertAttr {
     /// Build a schemars SchemaObject from the type/format fields.
     fn to_schema(&self) -> SchemaObject {
         let instance_type = self.type_field.as_ref().map(|t| {
-            let ty = match t.as_str() {
+            let ty = match t.value().as_str() {
                 "string" => InstanceType::String,
                 "number" => InstanceType::Number,
                 "integer" => InstanceType::Integer,
@@ -1116,7 +1160,7 @@ impl ConvertAttr {
 
         SchemaObject {
             instance_type,
-            format: self.format.clone(),
+            format: self.format.as_ref().map(|f| f.value()),
             ..Default::default()
         }
     }
@@ -1133,20 +1177,20 @@ fn find_convert_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<ConvertAttr>>
     Ok(result)
 }
 
-/// Parsed `#[oxapi("...")]` attribute for schema type renames.
-struct SchemaRenameAttr(String);
+/// Parsed `#[oxapi(SchemaName)]` attribute for schema type renames.
+struct SchemaRenameAttr(Ident);
 
 impl syn::parse::Parse for SchemaRenameAttr {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let lit: LitStr = input.parse()?;
-        Ok(SchemaRenameAttr(lit.value()))
+        let ident: Ident = input.parse()?;
+        Ok(SchemaRenameAttr(ident))
     }
 }
 
 /// Parsed `#[oxapi(method, "path", kind)]` attribute for generated type renames/replaces.
 struct OpAttr {
     method: oxapi_impl::HttpMethod,
-    path: String,
+    path: LitStr,
     kind: oxapi_impl::GeneratedTypeKind,
 }
 
@@ -1155,8 +1199,7 @@ impl syn::parse::Parse for OpAttr {
         let method_ident: Ident = input.parse()?;
         let method = parse_http_method(&method_ident)?;
         input.parse::<Token![,]>()?;
-        let path_lit: LitStr = input.parse()?;
-        let path = path_lit.value();
+        let path: LitStr = input.parse()?;
         input.parse::<Token![,]>()?;
         let kind_ident: Ident = input.parse()?;
         let kind = parse_type_kind(&kind_ident)?;
@@ -1293,8 +1336,8 @@ fn extract_passthrough_attrs(attrs: &[syn::Attribute]) -> Vec<proc_macro2::Token
 
 /// Result of parsing a `#[oxapi(...)]` attribute on a struct (rename context).
 enum StructOxapiAttr {
-    /// Simple rename for schema types: `#[oxapi("NewName")]`
-    Schema(String),
+    /// Simple rename for schema types: `#[oxapi(SchemaName)]`
+    Schema(Ident),
     /// Operation rename for generated types: `#[oxapi(get, "/path", ok)]`
     Operation(OpAttr),
 }
@@ -1325,7 +1368,7 @@ where
 /// Find `#[oxapi(...)]` attribute on a struct (for renames).
 fn find_struct_oxapi_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<StructOxapiAttr>> {
     find_single_oxapi_attr(attrs, |attr| {
-        // Try operation syntax first, then schema syntax
+        // Try operation syntax first, then schema syntax (single ident)
         if let Ok(op) = attr.parse_args::<OpAttr>() {
             Ok(StructOxapiAttr::Operation(op))
         } else {

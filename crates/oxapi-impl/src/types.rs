@@ -7,7 +7,7 @@ use openapiv3::{
     IntegerFormat, NumberFormat, ReferenceOr, Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
 };
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 /// Result of generating a type for a schema, including any inline struct definitions.
@@ -408,7 +408,8 @@ impl TypeGenerator {
             }
         });
 
-        let definition = quote! {
+        // Use struct name span so errors point to user's override if provided
+        let definition = quote_spanned! { struct_name.span() =>
             #[derive(Debug, Clone, serde::Deserialize)]
             pub struct #struct_name {
                 #(#fields,)*

@@ -47,8 +47,8 @@ impl<'a> ResponseGenerator<'a> {
     pub fn generate_for_operation(&self, op: &Operation) -> TokenStream {
         let op_name = op.name();
 
-        let ok_enum = self.generate_ok_enum(op, &op_name);
-        let err_enum = self.generate_err_enum(op, &op_name);
+        let ok_enum = self.generate_response_enum(op, &op_name, GeneratedTypeKind::Ok);
+        let err_enum = self.generate_response_enum(op, &op_name, GeneratedTypeKind::Err);
 
         quote! {
             #ok_enum
@@ -118,6 +118,59 @@ impl<'a> ResponseGenerator<'a> {
         Vec::new()
     }
 
+    /// Validate that all variant overrides reference status codes that exist in the spec.
+    /// Returns compile errors for any invalid status codes.
+    fn validate_variant_overrides(&self, op: &Operation, kind: GeneratedTypeKind) -> TokenStream {
+        let Some(TypeOverride::Rename {
+            variant_overrides, ..
+        }) = self.overrides.get(op.method, &op.path, kind)
+        else {
+            return quote! {};
+        };
+
+        // Collect valid status codes from the spec
+        let valid_codes: std::collections::HashSet<u16> = op
+            .responses
+            .iter()
+            .filter_map(|r| match (&r.status_code, kind) {
+                (ResponseStatus::Code(code), GeneratedTypeKind::Ok)
+                    if r.status_code.is_success() =>
+                {
+                    Some(*code)
+                }
+                (ResponseStatus::Code(code), GeneratedTypeKind::Err)
+                    if r.status_code.is_error() =>
+                {
+                    Some(*code)
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Check each override
+        let errors: Vec<_> = variant_overrides
+            .iter()
+            .filter(|(status, _)| !valid_codes.contains(status))
+            .map(|(status, ov)| {
+                let valid_list: Vec<_> = valid_codes.iter().collect();
+                let kind_name = match kind {
+                    GeneratedTypeKind::Ok => "success",
+                    GeneratedTypeKind::Err => "error",
+                    GeneratedTypeKind::Query => "query",
+                };
+                let msg = format!(
+                    "status code {} does not exist in the OpenAPI spec for {} {} (valid {} codes: {:?})",
+                    status, op.method, op.path, kind_name, valid_list
+                );
+                quote_spanned! { ov.name.span() =>
+                    compile_error!(#msg);
+                }
+            })
+            .collect();
+
+        quote! { #(#errors)* }
+    }
+
     /// Get attributes for an enum. If attrs contains a derive, returns only the attrs.
     /// Otherwise prepends the default derives.
     fn get_enum_attrs(&self, op: &Operation, kind: GeneratedTypeKind) -> Vec<TokenStream> {
@@ -138,32 +191,192 @@ impl<'a> ResponseGenerator<'a> {
         Vec::new()
     }
 
-    /// Generate the Ok (success) enum for an operation.
-    fn generate_ok_enum(&self, op: &Operation, op_name: &str) -> TokenStream {
+    /// Generate a response enum (Ok or Err) for an operation.
+    fn generate_response_enum(
+        &self,
+        op: &Operation,
+        op_name: &str,
+        kind: GeneratedTypeKind,
+    ) -> TokenStream {
         // Skip if replaced
-        if self
-            .overrides
-            .is_replaced(op.method, &op.path, GeneratedTypeKind::Ok)
-        {
+        if self.overrides.is_replaced(op.method, &op.path, kind) {
             return quote! {};
         }
 
-        let enum_name = self.get_enum_name(
-            op,
-            &format!("{}{}", op_name, self.suffixes.ok_suffix),
-            GeneratedTypeKind::Ok,
-        );
+        // Validate variant overrides reference valid status codes
+        let validation_errors = self.validate_variant_overrides(op, kind);
 
-        // Collect success responses (2xx status codes)
-        let success_responses: Vec<_> = op
+        let suffix = match kind {
+            GeneratedTypeKind::Ok => &self.suffixes.ok_suffix,
+            GeneratedTypeKind::Err => &self.suffixes.err_suffix,
+            GeneratedTypeKind::Query => unreachable!(),
+        };
+
+        let enum_name = self.get_enum_name(op, &format!("{}{}", op_name, suffix), kind);
+
+        // Collect relevant responses based on kind
+        let responses: Vec<_> = op
             .responses
             .iter()
-            .filter(|r| r.status_code.is_success())
+            .filter(|r| match kind {
+                GeneratedTypeKind::Ok => r.status_code.is_success(),
+                GeneratedTypeKind::Err => r.status_code.is_error(),
+                GeneratedTypeKind::Query => false,
+            })
             .collect();
 
-        if success_responses.is_empty() {
-            // No explicit success responses, create a default
-            return quote! {
+        // Handle empty responses with a default enum
+        if responses.is_empty() {
+            return self.generate_empty_fallback(&enum_name, kind);
+        }
+
+        let mut errors = Vec::new();
+        let mut inline_definitions = Vec::new();
+
+        // Process each response into variant info
+        let variants: Vec<VariantInfo> = responses
+            .iter()
+            .map(|resp| {
+                let (variant_name, status, is_default) = match &resp.status_code {
+                    ResponseStatus::Code(code) => {
+                        (self.get_variant_name(op, *code, kind), *code, false)
+                    }
+                    ResponseStatus::Default => {
+                        // Only error enums should have Default responses
+                        (format_ident!("Default"), 500, true)
+                    }
+                };
+
+                let variant_attrs = self.get_variant_attrs(op, status, kind);
+                let inner_type_override = self.get_inner_type_name(op, status, kind);
+
+                let body_type = if let Some(schema) = &resp.schema {
+                    // Validate: inner type override only allowed for inline schemas
+                    if let Some(ref inner_name) = inner_type_override
+                        && !TypeGenerator::is_inline_schema(schema)
+                    {
+                        errors.push(quote_spanned! { inner_name.span() =>
+                            compile_error!("inner type name override can only be used with inline schemas, not $ref");
+                        });
+                    }
+
+                    // Use override name or default name hint
+                    let name_hint = inner_type_override
+                        .as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| format!("{}{}", enum_name, variant_name));
+                    let generated = self
+                        .type_gen
+                        .type_for_schema_with_definitions(schema, &name_hint);
+                    inline_definitions.extend(generated.definitions);
+                    Some(generated.type_ref)
+                } else {
+                    None
+                };
+
+                VariantInfo {
+                    name: variant_name,
+                    body_type,
+                    status,
+                    is_default,
+                    attrs: variant_attrs,
+                }
+            })
+            .collect();
+
+        // Generate variant definitions
+        let variant_defs = variants.iter().map(|v| {
+            let name = &v.name;
+            let attrs = &v.attrs;
+            match (&v.body_type, v.is_default) {
+                (Some(ty), true) => quote! { #(#attrs)* #name(::axum::http::StatusCode, #ty) },
+                (Some(ty), false) => quote! { #(#attrs)* #name(#ty) },
+                (None, true) => quote! { #(#attrs)* #name(::axum::http::StatusCode) },
+                (None, false) => quote! { #(#attrs)* #name },
+            }
+        });
+
+        // Generate IntoResponse match arms
+        let into_response_arms = variants.iter().map(|v| {
+            let name = &v.name;
+            let status_code = status_code_ident(v.status);
+
+            match (&v.body_type, v.is_default) {
+                (Some(_), true) => quote! {
+                    Self::#name(status, body) => {
+                        (status, ::axum::Json(body)).into_response()
+                    }
+                },
+                (Some(_), false) => quote! {
+                    Self::#name(body) => {
+                        (#status_code, ::axum::Json(body)).into_response()
+                    }
+                },
+                (None, true) => quote! {
+                    Self::#name(status) => {
+                        status.into_response()
+                    }
+                },
+                (None, false) => quote! {
+                    Self::#name => {
+                        #status_code.into_response()
+                    }
+                },
+            }
+        });
+
+        let enum_attrs = self.get_enum_attrs(op, kind);
+        let default_derives = &self.suffixes.default_derives;
+
+        // If we have override attrs, use them; otherwise use default derives
+        let attrs_tokens = if enum_attrs.is_empty() {
+            quote! { #default_derives }
+        } else {
+            quote! { #(#enum_attrs)* }
+        };
+
+        // Use the enum name's span for the definition so error messages
+        // point to the user's enum definition, not the macro attribute
+        let enum_span = enum_name.span();
+
+        let enum_def = quote_spanned! { enum_span =>
+            #attrs_tokens
+            pub enum #enum_name {
+                #(#variant_defs,)*
+            }
+        };
+
+        quote! {
+            #validation_errors
+
+            #(#errors)*
+
+            #(#inline_definitions)*
+
+            #enum_def
+
+            impl ::axum::response::IntoResponse for #enum_name {
+                fn into_response(self) -> ::axum::response::Response {
+                    use ::axum::response::IntoResponse;
+                    match self {
+                        #(#into_response_arms)*
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generate a fallback enum when no responses are defined in the spec.
+    /// For Ok: generates a default Status200 variant.
+    /// For Err: returns empty (no error type generated when spec has no errors).
+    fn generate_empty_fallback(
+        &self,
+        enum_name: &syn::Ident,
+        kind: GeneratedTypeKind,
+    ) -> TokenStream {
+        let span = enum_name.span();
+        match kind {
+            GeneratedTypeKind::Ok => quote_spanned! { span =>
                 #[derive(Debug)]
                 pub enum #enum_name {
                     Status200,
@@ -178,284 +391,21 @@ impl<'a> ResponseGenerator<'a> {
                         }
                     }
                 }
-            };
-        }
-
-        let mut errors = Vec::new();
-        let mut inline_definitions = Vec::new();
-        let variants: Vec<_> = success_responses
-            .iter()
-            .map(|resp| {
-                let status = match &resp.status_code {
-                    ResponseStatus::Code(code) => *code,
-                    ResponseStatus::Default => 200,
-                };
-                let variant_name = self.get_variant_name(op, status, GeneratedTypeKind::Ok);
-                let variant_attrs = self.get_variant_attrs(op, status, GeneratedTypeKind::Ok);
-                let inner_type_override =
-                    self.get_inner_type_name(op, status, GeneratedTypeKind::Ok);
-
-                if let Some(schema) = &resp.schema {
-                    // Validate: inner type override only allowed for inline schemas
-                    if let Some(ref inner_name) = inner_type_override
-                        && !TypeGenerator::is_inline_schema(schema)
-                    {
-                        errors.push(quote_spanned! { inner_name.span() =>
-                            compile_error!("inner type name override can only be used with inline schemas, not $ref");
-                        });
-                    }
-
-                    // Use override name or default name hint
-                    let name_hint = inner_type_override
-                        .as_ref()
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| format!("{}{}", enum_name, variant_name));
-                    let generated = self
-                        .type_gen
-                        .type_for_schema_with_definitions(schema, &name_hint);
-                    inline_definitions.extend(generated.definitions);
-                    (variant_name, Some(generated.type_ref), status, variant_attrs)
-                } else {
-                    (variant_name, None, status, variant_attrs)
-                }
-            })
-            .collect();
-
-        let variant_defs = variants.iter().map(|(name, ty, _, attrs)| {
-            if let Some(ty) = ty {
-                quote! { #(#attrs)* #name(#ty) }
-            } else {
-                quote! { #(#attrs)* #name }
-            }
-        });
-
-        let into_response_arms = variants.iter().map(|(name, ty, status, _)| {
-            let status_code = status_code_ident(*status);
-
-            if ty.is_some() {
-                quote! {
-                    Self::#name(body) => {
-                        (
-                            #status_code,
-                            ::axum::Json(body),
-                        ).into_response()
-                    }
-                }
-            } else {
-                quote! {
-                    Self::#name => {
-                        #status_code.into_response()
-                    }
-                }
-            }
-        });
-
-        let enum_attrs = self.get_enum_attrs(op, GeneratedTypeKind::Ok);
-        let default_derives = &self.suffixes.default_derives;
-
-        // If we have override attrs, use them; otherwise use default derives
-        let attrs_tokens = if enum_attrs.is_empty() {
-            quote! { #default_derives }
-        } else {
-            quote! { #(#enum_attrs)* }
-        };
-
-        quote! {
-            #(#errors)*
-
-            #(#inline_definitions)*
-
-            #attrs_tokens
-            pub enum #enum_name {
-                #(#variant_defs,)*
-            }
-
-            impl ::axum::response::IntoResponse for #enum_name {
-                fn into_response(self) -> ::axum::response::Response {
-                    use ::axum::response::IntoResponse;
-                    match self {
-                        #(#into_response_arms)*
-                    }
-                }
-            }
+            },
+            // No error type generated when the spec defines no error responses
+            GeneratedTypeKind::Err => quote! {},
+            GeneratedTypeKind::Query => unreachable!(),
         }
     }
+}
 
-    /// Generate the Err (error) enum for an operation.
-    fn generate_err_enum(&self, op: &Operation, op_name: &str) -> TokenStream {
-        // Skip if replaced
-        if self
-            .overrides
-            .is_replaced(op.method, &op.path, GeneratedTypeKind::Err)
-        {
-            return quote! {};
-        }
-
-        let enum_name = self.get_enum_name(
-            op,
-            &format!("{}{}", op_name, self.suffixes.err_suffix),
-            GeneratedTypeKind::Err,
-        );
-
-        // Collect error responses (4xx, 5xx, and default)
-        let error_responses: Vec<_> = op
-            .responses
-            .iter()
-            .filter(|r| r.status_code.is_error())
-            .collect();
-
-        if error_responses.is_empty() {
-            // No explicit error responses, create a default
-            return quote! {
-                #[derive(Debug)]
-                pub enum #enum_name {
-                    Status500(String),
-                }
-
-                impl ::axum::response::IntoResponse for #enum_name {
-                    fn into_response(self) -> ::axum::response::Response {
-                        use ::axum::response::IntoResponse;
-                        match self {
-                            Self::Status500(msg) => {
-                                (
-                                    ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                    msg,
-                                ).into_response()
-                            }
-                        }
-                    }
-                }
-            };
-        }
-
-        let mut errors = Vec::new();
-        let mut inline_definitions = Vec::new();
-        let variants: Vec<_> = error_responses
-            .iter()
-            .map(|resp| {
-                let (variant_name, status, is_default) = match &resp.status_code {
-                    ResponseStatus::Code(code) => (
-                        self.get_variant_name(op, *code, GeneratedTypeKind::Err),
-                        *code,
-                        false,
-                    ),
-                    ResponseStatus::Default => (format_ident!("Default"), 500, true),
-                };
-                let variant_attrs = self.get_variant_attrs(op, status, GeneratedTypeKind::Err);
-                let inner_type_override =
-                    self.get_inner_type_name(op, status, GeneratedTypeKind::Err);
-
-                if let Some(schema) = &resp.schema {
-                    // Validate: inner type override only allowed for inline schemas
-                    if let Some(ref inner_name) = inner_type_override
-                        && !TypeGenerator::is_inline_schema(schema)
-                    {
-                        errors.push(quote_spanned! { inner_name.span() =>
-                            compile_error!("inner type name override can only be used with inline schemas, not $ref");
-                        });
-                    }
-
-                    // Use override name or default name hint
-                    let name_hint = inner_type_override
-                        .as_ref()
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| format!("{}{}", enum_name, variant_name));
-                    let generated = self
-                        .type_gen
-                        .type_for_schema_with_definitions(schema, &name_hint);
-                    inline_definitions.extend(generated.definitions);
-                    (
-                        variant_name,
-                        Some(generated.type_ref),
-                        status,
-                        is_default,
-                        variant_attrs,
-                    )
-                } else {
-                    (variant_name, None, status, is_default, variant_attrs)
-                }
-            })
-            .collect();
-
-        let variant_defs = variants.iter().map(|(name, ty, _, is_default, attrs)| {
-            if let Some(ty) = ty {
-                if *is_default {
-                    quote! { #(#attrs)* #name(::axum::http::StatusCode, #ty) }
-                } else {
-                    quote! { #(#attrs)* #name(#ty) }
-                }
-            } else if *is_default {
-                quote! { #(#attrs)* #name(::axum::http::StatusCode) }
-            } else {
-                quote! { #(#attrs)* #name }
-            }
-        });
-
-        let into_response_arms = variants.iter().map(|(name, ty, status, is_default, _)| {
-            let status_code = status_code_ident(*status);
-
-            if *is_default {
-                if ty.is_some() {
-                    quote! {
-                        Self::#name(status, body) => {
-                            (status, ::axum::Json(body)).into_response()
-                        }
-                    }
-                } else {
-                    quote! {
-                        Self::#name(status) => {
-                            status.into_response()
-                        }
-                    }
-                }
-            } else if ty.is_some() {
-                quote! {
-                    Self::#name(body) => {
-                        (
-                            #status_code,
-                            ::axum::Json(body),
-                        ).into_response()
-                    }
-                }
-            } else {
-                quote! {
-                    Self::#name => {
-                        #status_code.into_response()
-                    }
-                }
-            }
-        });
-
-        let enum_attrs = self.get_enum_attrs(op, GeneratedTypeKind::Err);
-        let default_derives = &self.suffixes.default_derives;
-
-        // If we have override attrs, use them; otherwise use default derives
-        let attrs_tokens = if enum_attrs.is_empty() {
-            quote! { #default_derives }
-        } else {
-            quote! { #(#enum_attrs)* }
-        };
-
-        quote! {
-            #(#errors)*
-
-            #(#inline_definitions)*
-
-            #attrs_tokens
-            pub enum #enum_name {
-                #(#variant_defs,)*
-            }
-
-            impl ::axum::response::IntoResponse for #enum_name {
-                fn into_response(self) -> ::axum::response::Response {
-                    use ::axum::response::IntoResponse;
-                    match self {
-                        #(#into_response_arms)*
-                    }
-                }
-            }
-        }
-    }
+/// Information about a response variant.
+struct VariantInfo {
+    name: syn::Ident,
+    body_type: Option<TokenStream>,
+    status: u16,
+    is_default: bool,
+    attrs: Vec<TokenStream>,
 }
 
 /// Generate a StatusCode expression for a numeric status.
