@@ -1130,7 +1130,9 @@ enum OxapiAttr {
     },
     /// Spec endpoint: `#[oxapi(spec, "/openapi.yaml")]`
     /// Returns the embedded spec contents at the given path.
-    Spec { path: String },
+    Spec {
+        path: String,
+    },
 }
 
 impl syn::parse::Parse for OxapiAttr {
