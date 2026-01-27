@@ -8,15 +8,23 @@ use tokio::sync::RwLock;
 // Module-based macro with split traits by responsibility
 #[oxapi::oxapi(axum, "petstore.json")]
 mod petstore {
-    #[rename(post, "/pet", ok)]
+    #[oxapi(post, "/pet", ok)]
     #[derive(Debug, Clone)]
     enum PetResponse {
-        #[status(200)]
+        #[oxapi(status = 200)]
         Created,
     }
 
-    #[rename("Pet")]
+    #[oxapi("Pet")]
     struct Animal;
+
+    // Example: Rename inline response type using variant syntax
+    // The GetInventory response has an inline object schema, we rename it to "Inventory"
+    #[oxapi(get, "/store/inventory", ok)]
+    enum InventoryResponse {
+        #[oxapi(status = 200)]
+        Success(Inventory),
+    }
 
     // Pet operations - generic over state type for dependency injection
     trait PetService<S: PetStateProvider> {
@@ -266,23 +274,16 @@ struct StoreServiceImpl;
 impl StoreService for StoreServiceImpl {
     async fn get_inventory(
         State(state): State<StoreState>,
-    ) -> Result<GetInventoryResponse, GetInventoryError> {
+    ) -> Result<InventoryResponse, GetInventoryError> {
         let pets = state.pets.read().await;
-        let mut inventory = serde_json::Map::new();
+        let mut _count_map = std::collections::HashMap::<String, i32>::new();
         for pet in pets.values() {
             if let Some(status) = &pet.status {
-                let key = status.to_string();
-                let count = inventory
-                    .entry(key)
-                    .or_insert(serde_json::Value::Number(0.into()));
-                if let serde_json::Value::Number(n) = count {
-                    *count = serde_json::Value::Number((n.as_i64().unwrap_or(0) + 1).into());
-                }
+                *_count_map.entry(status.to_string()).or_default() += 1;
             }
         }
-        Ok(GetInventoryResponse::Status200(serde_json::Value::Object(
-            inventory,
-        )))
+        // The Inventory type is generated from the inline schema
+        Ok(InventoryResponse::Success(Inventory {}))
     }
 
     async fn place_order(

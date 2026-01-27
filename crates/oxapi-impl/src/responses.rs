@@ -1,8 +1,7 @@
 //! Response enum generation.
 
-use heck::ToUpperCamelCase;
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 
 use crate::openapi::{Operation, ParsedSpec, ResponseStatus};
 use crate::types::TypeGenerator;
@@ -46,11 +45,7 @@ impl<'a> ResponseGenerator<'a> {
 
     /// Generate Ok and Err enums for a single operation.
     pub fn generate_for_operation(&self, op: &Operation) -> TokenStream {
-        let op_name = op
-            .operation_id
-            .as_deref()
-            .unwrap_or(&op.path)
-            .to_upper_camel_case();
+        let op_name = op.name();
 
         let ok_enum = self.generate_ok_enum(op, &op_name);
         let err_enum = self.generate_err_enum(op, &op_name);
@@ -71,7 +66,7 @@ impl<'a> ResponseGenerator<'a> {
         if let Some(TypeOverride::Rename { name, .. }) =
             self.overrides.get(op.method, &op.path, kind)
         {
-            format_ident!("{}", name)
+            name.clone()
         } else {
             format_ident!("{}", default_name)
         }
@@ -84,9 +79,26 @@ impl<'a> ResponseGenerator<'a> {
         }) = self.overrides.get(op.method, &op.path, kind)
             && let Some(ov) = variant_overrides.get(&status)
         {
-            return format_ident!("{}", ov.name);
+            return ov.name.clone();
         }
         format_ident!("Status{}", status)
+    }
+
+    /// Get the inner type name override for a status code, if specified.
+    fn get_inner_type_name(
+        &self,
+        op: &Operation,
+        status: u16,
+        kind: GeneratedTypeKind,
+    ) -> Option<syn::Ident> {
+        if let Some(TypeOverride::Rename {
+            variant_overrides, ..
+        }) = self.overrides.get(op.method, &op.path, kind)
+            && let Some(ov) = variant_overrides.get(&status)
+        {
+            return ov.inner_type_name.clone();
+        }
+        None
     }
 
     /// Get the variant attributes for a status code.
@@ -126,20 +138,13 @@ impl<'a> ResponseGenerator<'a> {
         Vec::new()
     }
 
-    /// Get the variant name for a default response.
-    fn get_default_variant_name(&self, _op: &Operation, _kind: GeneratedTypeKind) -> syn::Ident {
-        format_ident!("Default")
-    }
-
-    /// Check if the type is replaced.
-    fn is_replaced(&self, op: &Operation, kind: GeneratedTypeKind) -> bool {
-        self.overrides.is_replaced(op.method, &op.path, kind)
-    }
-
     /// Generate the Ok (success) enum for an operation.
     fn generate_ok_enum(&self, op: &Operation, op_name: &str) -> TokenStream {
         // Skip if replaced
-        if self.is_replaced(op, GeneratedTypeKind::Ok) {
+        if self
+            .overrides
+            .is_replaced(op.method, &op.path, GeneratedTypeKind::Ok)
+        {
             return quote! {};
         }
 
@@ -176,6 +181,8 @@ impl<'a> ResponseGenerator<'a> {
             };
         }
 
+        let mut errors = Vec::new();
+        let mut inline_definitions = Vec::new();
         let variants: Vec<_> = success_responses
             .iter()
             .map(|resp| {
@@ -185,12 +192,29 @@ impl<'a> ResponseGenerator<'a> {
                 };
                 let variant_name = self.get_variant_name(op, status, GeneratedTypeKind::Ok);
                 let variant_attrs = self.get_variant_attrs(op, status, GeneratedTypeKind::Ok);
+                let inner_type_override =
+                    self.get_inner_type_name(op, status, GeneratedTypeKind::Ok);
 
                 if let Some(schema) = &resp.schema {
-                    let ty = self
+                    // Validate: inner type override only allowed for inline schemas
+                    if let Some(ref inner_name) = inner_type_override
+                        && !TypeGenerator::is_inline_schema(schema)
+                    {
+                        errors.push(quote_spanned! { inner_name.span() =>
+                            compile_error!("inner type name override can only be used with inline schemas, not $ref");
+                        });
+                    }
+
+                    // Use override name or default name hint
+                    let name_hint = inner_type_override
+                        .as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| format!("{}{}", enum_name, variant_name));
+                    let generated = self
                         .type_gen
-                        .type_for_schema(schema, &format!("{}Response{}", op_name, status));
-                    (variant_name, Some(ty), status, variant_attrs)
+                        .type_for_schema_with_definitions(schema, &name_hint);
+                    inline_definitions.extend(generated.definitions);
+                    (variant_name, Some(generated.type_ref), status, variant_attrs)
                 } else {
                     (variant_name, None, status, variant_attrs)
                 }
@@ -237,6 +261,10 @@ impl<'a> ResponseGenerator<'a> {
         };
 
         quote! {
+            #(#errors)*
+
+            #(#inline_definitions)*
+
             #attrs_tokens
             pub enum #enum_name {
                 #(#variant_defs,)*
@@ -256,7 +284,10 @@ impl<'a> ResponseGenerator<'a> {
     /// Generate the Err (error) enum for an operation.
     fn generate_err_enum(&self, op: &Operation, op_name: &str) -> TokenStream {
         // Skip if replaced
-        if self.is_replaced(op, GeneratedTypeKind::Err) {
+        if self
+            .overrides
+            .is_replaced(op.method, &op.path, GeneratedTypeKind::Err)
+        {
             return quote! {};
         }
 
@@ -297,6 +328,8 @@ impl<'a> ResponseGenerator<'a> {
             };
         }
 
+        let mut errors = Vec::new();
+        let mut inline_definitions = Vec::new();
         let variants: Vec<_> = error_responses
             .iter()
             .map(|resp| {
@@ -306,19 +339,38 @@ impl<'a> ResponseGenerator<'a> {
                         *code,
                         false,
                     ),
-                    ResponseStatus::Default => (
-                        self.get_default_variant_name(op, GeneratedTypeKind::Err),
-                        500,
-                        true,
-                    ),
+                    ResponseStatus::Default => (format_ident!("Default"), 500, true),
                 };
                 let variant_attrs = self.get_variant_attrs(op, status, GeneratedTypeKind::Err);
+                let inner_type_override =
+                    self.get_inner_type_name(op, status, GeneratedTypeKind::Err);
 
                 if let Some(schema) = &resp.schema {
-                    let ty = self
+                    // Validate: inner type override only allowed for inline schemas
+                    if let Some(ref inner_name) = inner_type_override
+                        && !TypeGenerator::is_inline_schema(schema)
+                    {
+                        errors.push(quote_spanned! { inner_name.span() =>
+                            compile_error!("inner type name override can only be used with inline schemas, not $ref");
+                        });
+                    }
+
+                    // Use override name or default name hint
+                    let name_hint = inner_type_override
+                        .as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| format!("{}{}", enum_name, variant_name));
+                    let generated = self
                         .type_gen
-                        .type_for_schema(schema, &format!("{}Error{}", op_name, status));
-                    (variant_name, Some(ty), status, is_default, variant_attrs)
+                        .type_for_schema_with_definitions(schema, &name_hint);
+                    inline_definitions.extend(generated.definitions);
+                    (
+                        variant_name,
+                        Some(generated.type_ref),
+                        status,
+                        is_default,
+                        variant_attrs,
+                    )
                 } else {
                     (variant_name, None, status, is_default, variant_attrs)
                 }
@@ -385,6 +437,10 @@ impl<'a> ResponseGenerator<'a> {
         };
 
         quote! {
+            #(#errors)*
+
+            #(#inline_definitions)*
+
             #attrs_tokens
             pub enum #enum_name {
                 #(#variant_defs,)*

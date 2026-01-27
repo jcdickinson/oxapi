@@ -1,6 +1,5 @@
 //! Method transformation for trait methods.
 
-use heck::ToUpperCamelCase;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, GenericArgument, PathArguments, Type};
@@ -25,11 +24,7 @@ impl<'a> MethodTransformer<'a> {
 
     /// Transform a trait method based on its operation.
     pub fn transform(&self, method: &syn::TraitItemFn, op: &Operation) -> syn::Result<TokenStream> {
-        let op_name = op
-            .operation_id
-            .as_deref()
-            .unwrap_or(&op.path)
-            .to_upper_camel_case();
+        let op_name = op.name();
 
         let types_mod = self.types_mod;
         let overrides = self.generator.type_overrides();

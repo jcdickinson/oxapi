@@ -61,11 +61,15 @@ pub struct TypeOverrideKey {
     pub kind: GeneratedTypeKind,
 }
 
-/// Variant override info: name and attributes to pass through.
+/// Variant override info: name, inner type name, and attributes to pass through.
 #[derive(Debug, Clone)]
 pub struct VariantOverride {
-    pub name: String,
-    /// Attributes to apply to the variant (excluding the consumed #[status()])
+    /// The variant name (as an Ident for better error spans).
+    pub name: proc_macro2::Ident,
+    /// Optional inner type name override for inline schemas.
+    /// If specified, inline schemas for this variant will use this name instead of the default.
+    pub inner_type_name: Option<proc_macro2::Ident>,
+    /// Attributes to apply to the variant (excluding the consumed `#[status()]`)
     pub attrs: Vec<TokenStream>,
 }
 
@@ -74,9 +78,10 @@ pub struct VariantOverride {
 pub enum TypeOverride {
     /// Rename the type to a new name, optionally with variant renames
     Rename {
-        name: String,
-        /// Attributes to apply to the enum (excluding consumed #[rename(...)])
-        /// If this contains a #[derive(...)], it overrides the default.
+        /// The new name (as an Ident for better error spans).
+        name: proc_macro2::Ident,
+        /// Attributes to apply to the enum (excluding consumed `#[rename(...)]`)
+        /// If this contains a `#[derive(...)]`, it overrides the default.
         attrs: Vec<TokenStream>,
         /// Status code → variant override (name + attributes)
         variant_overrides: HashMap<u16, VariantOverride>,
@@ -103,7 +108,7 @@ impl TypeOverrides {
         method: HttpMethod,
         path: impl Into<String>,
         kind: GeneratedTypeKind,
-        new_name: impl Into<String>,
+        new_name: proc_macro2::Ident,
     ) {
         self.overrides.insert(
             TypeOverrideKey {
@@ -112,7 +117,7 @@ impl TypeOverrides {
                 kind,
             },
             TypeOverride::Rename {
-                name: new_name.into(),
+                name: new_name,
                 attrs: Vec::new(),
                 variant_overrides: HashMap::new(),
             },
@@ -125,7 +130,7 @@ impl TypeOverrides {
         method: HttpMethod,
         path: impl Into<String>,
         kind: GeneratedTypeKind,
-        new_name: impl Into<String>,
+        new_name: proc_macro2::Ident,
         attrs: Vec<TokenStream>,
         variant_overrides: HashMap<u16, VariantOverride>,
     ) {
@@ -136,7 +141,7 @@ impl TypeOverrides {
                 kind,
             },
             TypeOverride::Rename {
-                name: new_name.into(),
+                name: new_name,
                 attrs,
                 variant_overrides,
             },
@@ -207,6 +212,71 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Builder for configuring and creating a Generator.
+pub struct GeneratorBuilder {
+    spec: OpenAPI,
+    settings: TypeSpaceSettings,
+    type_overrides: TypeOverrides,
+    response_suffixes: ResponseSuffixes,
+    schema_renames: HashMap<String, String>,
+}
+
+impl GeneratorBuilder {
+    /// Create a builder from an OpenAPI spec.
+    pub fn new(spec: OpenAPI) -> Self {
+        Self {
+            spec,
+            settings: TypeSpaceSettings::default(),
+            type_overrides: TypeOverrides::default(),
+            response_suffixes: ResponseSuffixes::default(),
+            schema_renames: HashMap::new(),
+        }
+    }
+
+    /// Create a builder by loading an OpenAPI spec from a file.
+    pub fn from_file(path: &std::path::Path) -> Result<Self> {
+        let spec = openapi::load_spec(path)?;
+        Ok(Self::new(spec))
+    }
+
+    /// Set custom type space settings.
+    pub fn settings(mut self, settings: TypeSpaceSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Set type overrides for generated types.
+    pub fn type_overrides(mut self, overrides: TypeOverrides) -> Self {
+        self.type_overrides = overrides;
+        self
+    }
+
+    /// Set response suffixes configuration.
+    pub fn response_suffixes(mut self, suffixes: ResponseSuffixes) -> Self {
+        self.response_suffixes = suffixes;
+        self
+    }
+
+    /// Set schema renames (original name → new name).
+    pub fn schema_renames(mut self, renames: HashMap<String, String>) -> Self {
+        self.schema_renames = renames;
+        self
+    }
+
+    /// Build the Generator.
+    pub fn build(self) -> Result<Generator> {
+        let parsed = ParsedSpec::from_openapi(self.spec)?;
+        let type_gen = TypeGenerator::with_settings(&parsed, self.settings, self.schema_renames)?;
+
+        Ok(Generator {
+            spec: parsed,
+            type_gen,
+            type_overrides: self.type_overrides,
+            response_suffixes: self.response_suffixes,
+        })
+    }
+}
+
 /// Main generator that coordinates all the pieces.
 pub struct Generator {
     spec: ParsedSpec,
@@ -216,103 +286,29 @@ pub struct Generator {
 }
 
 impl Generator {
+    /// Create a builder from an OpenAPI spec.
+    pub fn builder(spec: OpenAPI) -> GeneratorBuilder {
+        GeneratorBuilder::new(spec)
+    }
+
+    /// Create a builder by loading an OpenAPI spec from a file.
+    pub fn builder_from_file(path: &std::path::Path) -> Result<GeneratorBuilder> {
+        GeneratorBuilder::from_file(path)
+    }
+
     /// Create a new generator from an OpenAPI spec with default settings.
     pub fn new(spec: OpenAPI) -> Result<Self> {
-        Self::with_settings(spec, TypeSpaceSettings::default())
+        GeneratorBuilder::new(spec).build()
     }
 
     /// Create a new generator from an OpenAPI spec with custom type settings.
     pub fn with_settings(spec: OpenAPI, settings: TypeSpaceSettings) -> Result<Self> {
-        Self::with_all_settings(
-            spec,
-            settings,
-            TypeOverrides::default(),
-            ResponseSuffixes::default(),
-        )
-    }
-
-    /// Create a new generator with all settings.
-    pub fn with_all_settings(
-        spec: OpenAPI,
-        settings: TypeSpaceSettings,
-        type_overrides: TypeOverrides,
-        response_suffixes: ResponseSuffixes,
-    ) -> Result<Self> {
-        Self::with_all_settings_and_renames(
-            spec,
-            settings,
-            type_overrides,
-            response_suffixes,
-            std::collections::HashMap::new(),
-        )
-    }
-
-    /// Create a new generator with all settings including schema renames.
-    pub fn with_all_settings_and_renames(
-        spec: OpenAPI,
-        settings: TypeSpaceSettings,
-        type_overrides: TypeOverrides,
-        response_suffixes: ResponseSuffixes,
-        schema_renames: std::collections::HashMap<String, String>,
-    ) -> Result<Self> {
-        let parsed = ParsedSpec::from_openapi(spec)?;
-        let type_gen = TypeGenerator::with_settings(&parsed, settings, schema_renames)?;
-
-        Ok(Self {
-            spec: parsed,
-            type_gen,
-            type_overrides,
-            response_suffixes,
-        })
+        GeneratorBuilder::new(spec).settings(settings).build()
     }
 
     /// Load and parse an OpenAPI spec from a file path.
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        let spec = openapi::load_spec(path)?;
-        Self::new(spec)
-    }
-
-    /// Load and parse an OpenAPI spec from a file path with custom type settings.
-    pub fn from_file_with_settings(
-        path: &std::path::Path,
-        settings: TypeSpaceSettings,
-    ) -> Result<Self> {
-        let spec = openapi::load_spec(path)?;
-        Self::with_settings(spec, settings)
-    }
-
-    /// Load and parse an OpenAPI spec from a file path with all settings.
-    pub fn from_file_with_all_settings(
-        path: &std::path::Path,
-        settings: TypeSpaceSettings,
-        type_overrides: TypeOverrides,
-        response_suffixes: ResponseSuffixes,
-    ) -> Result<Self> {
-        Self::from_file_with_all_settings_and_renames(
-            path,
-            settings,
-            type_overrides,
-            response_suffixes,
-            std::collections::HashMap::new(),
-        )
-    }
-
-    /// Load and parse an OpenAPI spec from a file path with all settings including schema renames.
-    pub fn from_file_with_all_settings_and_renames(
-        path: &std::path::Path,
-        settings: TypeSpaceSettings,
-        type_overrides: TypeOverrides,
-        response_suffixes: ResponseSuffixes,
-        schema_renames: std::collections::HashMap<String, String>,
-    ) -> Result<Self> {
-        let spec = openapi::load_spec(path)?;
-        Self::with_all_settings_and_renames(
-            spec,
-            settings,
-            type_overrides,
-            response_suffixes,
-            schema_renames,
-        )
+        GeneratorBuilder::from_file(path)?.build()
     }
 
     /// Get the parsed spec.
@@ -392,5 +388,4 @@ impl Generator {
             Err(Error::MissingOperations(missing))
         }
     }
-
 }

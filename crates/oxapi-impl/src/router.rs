@@ -3,17 +3,12 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::Generator;
 use crate::openapi::HttpMethod;
 
 /// Generator for axum router code.
 pub struct RouterGenerator;
 
 impl RouterGenerator {
-    pub fn new(_generator: &Generator) -> Self {
-        Self
-    }
-
     /// Generate the body of the map_routes function.
     ///
     /// The methods parameter is a list of (method_name, http_method, path) tuples.

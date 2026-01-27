@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
+use heck::ToUpperCamelCase;
 use openapiv3::{OpenAPI, ReferenceOr, Schema, StatusCode};
 
 use crate::{Error, Result};
@@ -111,6 +112,18 @@ pub struct Operation {
     pub request_body: Option<RequestBody>,
     pub responses: Vec<OperationResponse>,
     pub tags: Vec<String>,
+}
+
+impl Operation {
+    /// Get the operation name in PascalCase.
+    ///
+    /// Uses the `operation_id` if available, otherwise falls back to the path.
+    pub fn name(&self) -> String {
+        self.operation_id
+            .as_deref()
+            .unwrap_or(&self.path)
+            .to_upper_camel_case()
+    }
 }
 
 /// Request body information.
