@@ -16,6 +16,7 @@ quote = { workspace = true } #unified
 schemars = "0.8"
 serde = { workspace = true } #unified
 serde_json = { workspace = true } #unified
+serde-value = "0.7.0"
 yaml_serde = { version = "0.10" }
 syn = { workspace = true } #unified
 thiserror = "2.0"

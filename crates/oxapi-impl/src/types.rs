@@ -442,10 +442,8 @@ impl TypeGenerator {
 
 /// Convert an OpenAPI schema to a schemars schema for typify.
 fn convert_to_schemars(schema: &ReferenceOr<Schema>) -> Result<schemars::schema::Schema> {
-    // Serialize to JSON and deserialize as schemars schema
-    let json = serde_json::to_value(schema)
-        .map_err(|e| Error::TypeGenError(format!("failed to serialize schema: {}", e)))?;
-
-    serde_json::from_value(json)
-        .map_err(|e| Error::TypeGenError(format!("failed to convert schema: {}", e)))
+    serde_value::to_value(schema)
+        .map_err(|e| Error::TypeGenError(format!("failed to serialize schema: {}", e)))?
+        .deserialize_into::<schemars::schema::Schema>()
+        .map_err(|e| Error::TypeGenError(format!("failed to deserialize schema: {}", e)))
 }
