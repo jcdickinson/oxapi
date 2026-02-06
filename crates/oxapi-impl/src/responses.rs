@@ -35,7 +35,7 @@ impl<'a> ResponseGenerator<'a> {
         match kind {
             GeneratedTypeKind::Ok => status.is_success(),
             GeneratedTypeKind::Err => status.is_error(),
-            GeneratedTypeKind::Query => false,
+            GeneratedTypeKind::Query | GeneratedTypeKind::Path => false,
         }
     }
 
@@ -165,6 +165,7 @@ impl<'a> ResponseGenerator<'a> {
                     GeneratedTypeKind::Ok => "success",
                     GeneratedTypeKind::Err => "error",
                     GeneratedTypeKind::Query => "query",
+                    GeneratedTypeKind::Path => "path",
                 };
                 let msg = format!(
                     "status code {} does not exist in the OpenAPI spec for {} {} (valid {} codes: {:?})",
@@ -199,46 +200,18 @@ impl<'a> ResponseGenerator<'a> {
         Vec::new()
     }
 
-    /// Generate a response enum (Ok or Err) for an operation.
-    fn generate_response_enum(
+    /// Collect variants from responses, separating data collection from code generation.
+    fn collect_variants(
         &self,
         op: &Operation,
-        op_name: &str,
         kind: GeneratedTypeKind,
-    ) -> TokenStream {
-        // Skip if replaced
-        if self.overrides.is_replaced(op.method, &op.path, kind) {
-            return quote! {};
-        }
-
-        // Validate variant overrides reference valid status codes
-        let validation_errors = self.validate_variant_overrides(op, kind);
-
-        let suffix = match kind {
-            GeneratedTypeKind::Ok => &self.suffixes.ok_suffix,
-            GeneratedTypeKind::Err => &self.suffixes.err_suffix,
-            GeneratedTypeKind::Query => unreachable!(),
-        };
-
-        let enum_name = self.get_enum_name(op, &format!("{}{}", op_name, suffix), kind);
-
-        // Collect relevant responses based on kind
-        let responses: Vec<_> = op
-            .responses
-            .iter()
-            .filter(|r| Self::response_matches_kind(&r.status_code, kind))
-            .collect();
-
-        // Handle empty responses with a default enum
-        if responses.is_empty() {
-            return self.generate_empty_fallback(&enum_name, kind);
-        }
-
+        enum_name: &syn::Ident,
+        responses: &[&crate::openapi::OperationResponse],
+    ) -> CollectedVariants {
         let mut errors = Vec::new();
         let mut inline_definitions = Vec::new();
 
-        // Process each response into variant info
-        let variants: Vec<VariantInfo> = responses
+        let variants = responses
             .iter()
             .map(|resp| {
                 let (variant_name, status, is_default) = match &resp.status_code {
@@ -287,6 +260,55 @@ impl<'a> ResponseGenerator<'a> {
                 }
             })
             .collect();
+
+        CollectedVariants {
+            variants,
+            errors,
+            inline_definitions,
+        }
+    }
+
+    /// Generate a response enum (Ok or Err) for an operation.
+    fn generate_response_enum(
+        &self,
+        op: &Operation,
+        op_name: &str,
+        kind: GeneratedTypeKind,
+    ) -> TokenStream {
+        // Skip if replaced
+        if self.overrides.is_replaced(op.method, &op.path, kind) {
+            return quote! {};
+        }
+
+        // Validate variant overrides reference valid status codes
+        let validation_errors = self.validate_variant_overrides(op, kind);
+
+        let suffix = match kind {
+            GeneratedTypeKind::Ok => &self.suffixes.ok_suffix,
+            GeneratedTypeKind::Err => &self.suffixes.err_suffix,
+            GeneratedTypeKind::Query | GeneratedTypeKind::Path => unreachable!(),
+        };
+
+        let enum_name = self.get_enum_name(op, &format!("{}{}", op_name, suffix), kind);
+
+        // Collect relevant responses based on kind
+        let responses: Vec<_> = op
+            .responses
+            .iter()
+            .filter(|r| Self::response_matches_kind(&r.status_code, kind))
+            .collect();
+
+        // Handle empty responses with a default enum
+        if responses.is_empty() {
+            return self.generate_empty_fallback(&enum_name, kind);
+        }
+
+        // Collect variants with their errors and inline definitions
+        let CollectedVariants {
+            variants,
+            errors,
+            inline_definitions,
+        } = self.collect_variants(op, kind, &enum_name, &responses);
 
         // Generate variant definitions
         let variant_defs = variants.iter().map(|v| {
@@ -398,7 +420,7 @@ impl<'a> ResponseGenerator<'a> {
             },
             // No error type generated when the spec defines no error responses
             GeneratedTypeKind::Err => quote! {},
-            GeneratedTypeKind::Query => unreachable!(),
+            GeneratedTypeKind::Query | GeneratedTypeKind::Path => unreachable!(),
         }
     }
 }
@@ -410,6 +432,13 @@ struct VariantInfo {
     status: u16,
     is_default: bool,
     attrs: Vec<TokenStream>,
+}
+
+/// Result of collecting variants from responses.
+struct CollectedVariants {
+    variants: Vec<VariantInfo>,
+    errors: Vec<TokenStream>,
+    inline_definitions: Vec<TokenStream>,
 }
 
 /// Well-known HTTP status codes with their constant names.

@@ -3,12 +3,10 @@
 use std::collections::HashMap;
 
 use heck::{AsSnakeCase, ToUpperCamelCase};
-use openapiv3::{
-    IntegerFormat, NumberFormat, ReferenceOr, Schema, SchemaKind, Type, VariantOrUnknownOrEmpty,
-};
+use openapiv3::{ReferenceOr, Schema, SchemaKind, Type};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
-use typify::{TypeSpace, TypeSpaceSettings};
+use typify::{TypeId, TypeSpace, TypeSpaceSettings};
 
 /// Result of generating a type for a schema, including any inline struct definitions.
 pub struct GeneratedType {
@@ -18,18 +16,30 @@ pub struct GeneratedType {
     pub definitions: Vec<TokenStream>,
 }
 
+impl GeneratedType {
+    /// Create a GeneratedType with just a type reference (no inline definitions).
+    pub fn simple(type_ref: TokenStream) -> Self {
+        Self {
+            type_ref,
+            definitions: vec![],
+        }
+    }
+}
+
 use crate::openapi::{Operation, OperationParam, ParamLocation, ParsedSpec, RequestBody};
 use crate::{Error, GeneratedTypeKind, Result, TypeOverride, TypeOverrides};
 
 /// Type generator that wraps typify's TypeSpace.
 ///
 /// Uses a two-pass approach:
-/// 1. Pass 1: Generate all types (component schemas + auto-generated types)
+/// 1. Pass 1: Generate all types (component schemas + inline param schemas)
 /// 2. Pass 2: Generate code that references types using the registry built in Pass 1
 pub struct TypeGenerator {
     type_space: TypeSpace,
     /// Map from schema name (as in OpenAPI spec) to final type name (after typify processing)
     schema_to_type: HashMap<String, String>,
+    /// Map from inline schema name hints to typify TypeIds for lookup during generation
+    inline_types: HashMap<String, TypeId>,
 }
 
 impl TypeGenerator {
@@ -62,7 +72,7 @@ impl TypeGenerator {
                 .schemas
                 .iter()
                 .map(|(name, schema)| {
-                    let schema = convert_to_schemars(schema)?;
+                    let schema = to_schemars(schema)?;
                     Ok((name.clone(), schema))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -107,9 +117,45 @@ impl TypeGenerator {
             }
         }
 
+        // Pre-populate inline schemas for all operation parameters
+        let mut inline_types = HashMap::new();
+        for op in spec.operations() {
+            let op_name = op.raw_name();
+
+            // Add path and query parameter schemas
+            for param in &op.parameters {
+                if let Some(ReferenceOr::Item(schema)) = &param.schema {
+                    let name_hint = param.name.to_upper_camel_case();
+                    register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
+                }
+            }
+
+            // Add request body schemas
+            if let Some(body) = &op.request_body {
+                if let Some(ReferenceOr::Item(schema)) = &body.schema {
+                    let name_hint = format!("{}Body", op_name.to_upper_camel_case());
+                    register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
+                }
+            }
+
+            // Add response body schemas
+            for resp in &op.responses {
+                if let Some(ReferenceOr::Item(schema)) = &resp.schema {
+                    let status_suffix = match resp.status_code {
+                        crate::openapi::ResponseStatus::Code(code) => code.to_string(),
+                        crate::openapi::ResponseStatus::Default => "Default".to_string(),
+                    };
+                    let name_hint =
+                        format!("{}Response{}", op_name.to_upper_camel_case(), status_suffix);
+                    register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
+                }
+            }
+        }
+
         Ok(Self {
             type_space,
             schema_to_type,
+            inline_types,
         })
     }
 
@@ -126,6 +172,17 @@ impl TypeGenerator {
 
         // Look up in our map (built from TypeSpace)
         self.schema_to_type.get(schema_name).cloned()
+    }
+
+    /// Resolve a schema reference to a type TokenStream.
+    /// Returns the type ident if found, or `serde_json::Value` as fallback.
+    fn resolve_reference(&self, reference: &str) -> TokenStream {
+        if let Some(type_name) = self.get_type_name(reference) {
+            let ident = format_ident!("{}", type_name);
+            quote! { #ident }
+        } else {
+            quote! { serde_json::Value }
+        }
     }
 
     /// Check if a schema is inline (not a reference).
@@ -147,14 +204,7 @@ impl TypeGenerator {
         name_hint: &str,
     ) -> TokenStream {
         match schema {
-            ReferenceOr::Reference { reference } => {
-                if let Some(type_name) = self.get_type_name(reference) {
-                    let ident = format_ident!("{}", type_name);
-                    quote! { #ident }
-                } else {
-                    quote! { serde_json::Value }
-                }
-            }
+            ReferenceOr::Reference { reference } => self.resolve_reference(reference),
             ReferenceOr::Item(schema) => self.type_for_inline_schema(schema, name_hint).type_ref,
         }
     }
@@ -168,75 +218,41 @@ impl TypeGenerator {
     ) -> GeneratedType {
         match schema {
             ReferenceOr::Reference { reference } => {
-                let type_ref = if let Some(type_name) = self.get_type_name(reference) {
-                    let ident = format_ident!("{}", type_name);
-                    quote! { #ident }
-                } else {
-                    quote! { serde_json::Value }
-                };
-                GeneratedType {
-                    type_ref,
-                    definitions: vec![],
-                }
+                GeneratedType::simple(self.resolve_reference(reference))
             }
             ReferenceOr::Item(schema) => self.type_for_inline_schema(schema, name_hint),
         }
     }
 
     /// Generate a type for an inline schema, returning both the type reference and any definitions.
+    ///
+    /// First checks if the schema was pre-registered with typify during initialization.
+    /// If found, uses typify's generated ident. Otherwise falls back to manual handling.
     fn type_for_inline_schema(&self, schema: &Schema, name_hint: &str) -> GeneratedType {
+        // Check if this schema was pre-registered with typify
+        if let Some(type_id) = self.inline_types.get(name_hint) {
+            if let Ok(typ) = self.type_space.get_type(type_id) {
+                return GeneratedType::simple(typ.ident());
+            }
+        }
+
+        // Fall back to manual handling for schemas not pre-registered
+        // (e.g., nested schemas within arrays/objects that weren't traversed during init)
         match &schema.schema_kind {
-            SchemaKind::Type(Type::String(_)) => GeneratedType {
-                type_ref: quote! { String },
-                definitions: vec![],
-            },
-            SchemaKind::Type(Type::Integer(int_type)) => {
-                let type_ref = match &int_type.format {
-                    VariantOrUnknownOrEmpty::Item(IntegerFormat::Int32) => quote! { i32 },
-                    VariantOrUnknownOrEmpty::Item(IntegerFormat::Int64) => quote! { i64 },
-                    _ => quote! { i64 },
-                };
-                GeneratedType {
-                    type_ref,
-                    definitions: vec![],
-                }
-            }
-            SchemaKind::Type(Type::Number(num_type)) => {
-                let type_ref = match &num_type.format {
-                    VariantOrUnknownOrEmpty::Item(NumberFormat::Float) => quote! { f32 },
-                    VariantOrUnknownOrEmpty::Item(NumberFormat::Double) => quote! { f64 },
-                    _ => quote! { f64 },
-                };
-                GeneratedType {
-                    type_ref,
-                    definitions: vec![],
-                }
-            }
-            SchemaKind::Type(Type::Boolean(_)) => GeneratedType {
-                type_ref: quote! { bool },
-                definitions: vec![],
-            },
+            SchemaKind::Type(Type::String(_)) => GeneratedType::simple(quote! { String }),
+            SchemaKind::Type(Type::Integer(_)) => GeneratedType::simple(quote! { i64 }),
+            SchemaKind::Type(Type::Number(_)) => GeneratedType::simple(quote! { f64 }),
+            SchemaKind::Type(Type::Boolean(_)) => GeneratedType::simple(quote! { bool }),
             SchemaKind::Type(Type::Array(arr)) => {
                 if let Some(items) = &arr.items {
                     let inner = self.type_for_boxed_schema(items, &format!("{}Item", name_hint));
-                    GeneratedType {
-                        type_ref: quote! { Vec<#inner> },
-                        definitions: vec![],
-                    }
+                    GeneratedType::simple(quote! { Vec<#inner> })
                 } else {
-                    GeneratedType {
-                        type_ref: quote! { Vec<serde_json::Value> },
-                        definitions: vec![],
-                    }
+                    GeneratedType::simple(quote! { Vec<serde_json::Value> })
                 }
             }
-            SchemaKind::Type(Type::Object(obj)) => {
-                self.generate_inline_struct(obj, &schema.schema_data, name_hint)
-            }
-            _ => GeneratedType {
-                type_ref: quote! { serde_json::Value },
-                definitions: vec![],
-            },
+            SchemaKind::Type(Type::Object(obj)) => self.generate_inline_struct(obj, name_hint),
+            _ => GeneratedType::simple(quote! { serde_json::Value }),
         }
     }
 
@@ -244,7 +260,6 @@ impl TypeGenerator {
     fn generate_inline_struct(
         &self,
         obj: &openapiv3::ObjectType,
-        _schema_data: &openapiv3::SchemaData,
         name_hint: &str,
     ) -> GeneratedType {
         let struct_name = format_ident!("{}", name_hint.to_upper_camel_case());
@@ -262,16 +277,7 @@ impl TypeGenerator {
                 let inner_hint = format!("{}{}", name_hint, prop_name.to_upper_camel_case());
                 let generated = match prop_schema {
                     ReferenceOr::Reference { reference } => {
-                        let type_ref = if let Some(type_name) = self.get_type_name(reference) {
-                            let ident = format_ident!("{}", type_name);
-                            quote! { #ident }
-                        } else {
-                            quote! { serde_json::Value }
-                        };
-                        GeneratedType {
-                            type_ref,
-                            definitions: vec![],
-                        }
+                        GeneratedType::simple(self.resolve_reference(reference))
                     }
                     ReferenceOr::Item(schema) => self.type_for_inline_schema(schema, &inner_hint),
                 };
@@ -315,17 +321,8 @@ impl TypeGenerator {
         }
     }
 
-    /// Get the type for a path parameter.
-    pub fn path_param_type(&self, param: &OperationParam) -> TokenStream {
-        if let Some(schema) = &param.schema {
-            self.type_for_schema(schema, &param.name.to_upper_camel_case())
-        } else {
-            quote! { String }
-        }
-    }
-
-    /// Get the type for a query parameter.
-    pub fn query_param_type(&self, param: &OperationParam) -> TokenStream {
+    /// Get the type for a path or query parameter.
+    pub fn param_type(&self, param: &OperationParam) -> TokenStream {
         if let Some(schema) = &param.schema {
             self.type_for_schema(schema, &param.name.to_upper_camel_case())
         } else {
@@ -342,28 +339,15 @@ impl TypeGenerator {
         }
     }
 
-    /// Get the type for a response body.
-    pub fn response_type(
-        &self,
-        schema: &Option<ReferenceOr<Schema>>,
-        op_name: &str,
-        status: u16,
-    ) -> TokenStream {
-        if let Some(schema) = schema {
-            self.type_for_schema(
-                schema,
-                &format!("{}Response{}", op_name.to_upper_camel_case(), status),
-            )
-        } else {
-            quote! { () }
-        }
-    }
-
     /// Generate a query params struct for an operation.
+    ///
+    /// If `unknown_field` is provided, an additional `#[serde(flatten)]` field with that name
+    /// will be added to capture unknown query parameters as `HashMap<String, String>`.
     pub fn generate_query_struct(
         &self,
         op: &Operation,
         overrides: &TypeOverrides,
+        unknown_field: Option<&syn::Ident>,
     ) -> Option<(syn::Ident, TokenStream)> {
         // Check if replaced
         if overrides.is_replaced(op.method, &op.path, GeneratedTypeKind::Query) {
@@ -376,7 +360,8 @@ impl TypeGenerator {
             .filter(|p| p.location == ParamLocation::Query)
             .collect();
 
-        if query_params.is_empty() {
+        // Allow struct generation with unknown_field even if no query params
+        if query_params.is_empty() && unknown_field.is_none() {
             return None;
         }
 
@@ -399,12 +384,100 @@ impl TypeGenerator {
 
         let fields = query_params.iter().map(|param| {
             let name = format_ident!("{}", heck::AsSnakeCase(&param.name).to_string());
-            let ty = self.query_param_type(param);
+            let ty = self.param_type(param);
 
             if param.required {
                 quote! { pub #name: #ty }
             } else {
                 quote! { pub #name: Option<#ty> }
+            }
+        });
+
+        // Generate unknown field with serde(flatten) if requested
+        let unknown_field_def = unknown_field.map(|name| {
+            quote! {
+                #[serde(flatten)]
+                pub #name: ::std::collections::HashMap<String, String>
+            }
+        });
+
+        // Use struct name span so errors point to user's override if provided
+        let definition = quote_spanned! { struct_name.span() =>
+            #[derive(Debug, Clone, serde::Deserialize)]
+            pub struct #struct_name {
+                #(#fields,)*
+                #unknown_field_def
+            }
+        };
+
+        Some((struct_name, definition))
+    }
+
+    /// Generate a path params struct for an operation.
+    ///
+    /// Returns `Some((struct_name, struct_definition))` if the operation has path params,
+    /// or `None` if there are no path params or the struct is replaced by an override.
+    ///
+    /// Path parameters are sorted by their position in the URL path to ensure correct
+    /// serde deserialization order.
+    pub fn generate_path_struct(
+        &self,
+        op: &Operation,
+        overrides: &TypeOverrides,
+    ) -> Option<(syn::Ident, TokenStream)> {
+        // Check if replaced
+        if overrides.is_replaced(op.method, &op.path, GeneratedTypeKind::Path) {
+            return None;
+        }
+
+        // Get path params and sort by position in URL
+        let mut path_params: Vec<_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == ParamLocation::Path)
+            .collect();
+
+        if path_params.is_empty() {
+            return None;
+        }
+
+        // Sort by position in the path string
+        path_params.sort_by_key(|p| {
+            let placeholder = format!("{{{}}}", p.name);
+            op.path.find(&placeholder).unwrap_or(usize::MAX)
+        });
+
+        let default_name = format!(
+            "{}Path",
+            op.operation_id
+                .as_deref()
+                .unwrap_or(&op.path)
+                .to_upper_camel_case()
+        );
+
+        // Check for rename override
+        let struct_name = if let Some(TypeOverride::Rename { name, .. }) =
+            overrides.get(op.method, &op.path, GeneratedTypeKind::Path)
+        {
+            name.clone()
+        } else {
+            format_ident!("{}", default_name)
+        };
+
+        let fields = path_params.iter().map(|param| {
+            let snake_name = heck::AsSnakeCase(&param.name).to_string();
+            let field_name = format_ident!("{}", snake_name);
+            let ty = self.param_type(param);
+            let param_name = &param.name;
+
+            // Add serde rename if field name differs from param name (for path deserialization)
+            if snake_name != param.name {
+                quote! {
+                    #[serde(rename = #param_name)]
+                    pub #field_name: #ty
+                }
+            } else {
+                quote! { pub #field_name: #ty }
             }
         });
 
@@ -418,32 +491,28 @@ impl TypeGenerator {
 
         Some((struct_name, definition))
     }
-
-    /// Generate a path params type for an operation (usually a tuple).
-    pub fn generate_path_type(&self, op: &Operation) -> TokenStream {
-        let path_params: Vec<_> = op
-            .parameters
-            .iter()
-            .filter(|p| p.location == ParamLocation::Path)
-            .collect();
-
-        if path_params.is_empty() {
-            return quote! { () };
-        }
-
-        if path_params.len() == 1 {
-            return self.path_param_type(path_params[0]);
-        }
-
-        let types = path_params.iter().map(|p| self.path_param_type(p));
-        quote! { (#(#types),*) }
-    }
 }
 
-/// Convert an OpenAPI schema to a schemars schema for typify.
-fn convert_to_schemars(schema: &ReferenceOr<Schema>) -> Result<schemars::schema::Schema> {
+/// Convert any serializable schema type to a schemars schema for typify.
+fn to_schemars<T: serde::Serialize>(schema: &T) -> Result<schemars::schema::Schema> {
     serde_value::to_value(schema)
         .map_err(|e| Error::TypeGenError(format!("failed to serialize schema: {}", e)))?
         .deserialize_into::<schemars::schema::Schema>()
         .map_err(|e| Error::TypeGenError(format!("failed to deserialize schema: {}", e)))
+}
+
+/// Register an inline schema with typify, returning the TypeId if successful.
+fn register_inline_schema(
+    type_space: &mut TypeSpace,
+    inline_types: &mut HashMap<String, TypeId>,
+    schema: &Schema,
+    name_hint: String,
+) {
+    if let Ok(schemars_schema) = to_schemars(schema) {
+        if let Ok(type_id) =
+            type_space.add_type_with_name(&schemars_schema, Some(name_hint.clone()))
+        {
+            inline_types.insert(name_hint, type_id);
+        }
+    }
 }

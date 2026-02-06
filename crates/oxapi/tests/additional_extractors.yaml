@@ -111,6 +111,48 @@ paths:
                 items:
                   $ref: '#/components/schemas/Item'
 
+  # Test endpoint with various parameter types
+  /typed/{user_id}/items/{item_id}:
+    get:
+      operationId: getTypedItem
+      summary: Get item with typed path params
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: item_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: version
+          in: query
+          schema:
+            type: integer
+            format: int32
+        - name: active
+          in: query
+          schema:
+            type: boolean
+        - name: score
+          in: query
+          schema:
+            type: number
+            format: float
+      responses:
+        '200':
+          description: The typed item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '404':
+          description: Not found
+
 components:
   schemas:
     Item:

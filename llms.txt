@@ -1,0 +1,350 @@
+# oxapi
+
+> Generate type-safe Rust server stubs from OpenAPI specifications. Currently supports axum.
+
+## Overview
+
+oxapi is a procedural macro that reads an OpenAPI spec and generates:
+- Type-safe request/response types from schemas
+- Query and path parameter structs
+- Response enums with `IntoResponse` implementations
+- Route mapping via traits
+
+The macro uses type elision (`_`) to infer types from the spec while allowing custom extractors to pass through unchanged.
+
+## Quick Start
+
+```rust
+use axum::{Router, extract::{State, Path, Query, Json}};
+
+#[oxapi::oxapi(axum, "spec.json")]
+mod api {
+    trait PetService<S> {
+        #[oxapi(map)]
+        fn map_routes(router: Router<S>) -> Router<S>;
+
+        #[oxapi(get, "/pet/{petId}")]
+        async fn get_pet(state: State<S>, pet_id: Path<_>);
+
+        #[oxapi(post, "/pet")]
+        async fn add_pet(state: State<S>, body: Json<_>);
+    }
+}
+
+use api::{types::*, PetService};
+
+struct MyPetService;
+
+impl PetService<AppState> for MyPetService {
+    fn map_routes(router: Router<AppState>) -> Router<AppState> {
+        <Self as PetService<AppState>>::map_routes(router)
+    }
+
+    async fn get_pet(
+        State(state): State<AppState>,
+        Path(pet_id): Path<i64>,
+    ) -> Result<GetPetResponse, GetPetError> {
+        // ...
+    }
+
+    async fn add_pet(
+        State(state): State<AppState>,
+        Json(pet): Json<Pet>,
+    ) -> Result<AddPetResponse, AddPetError> {
+        // ...
+    }
+}
+```
+
+## Macro Syntax
+
+```text
+#[oxapi(framework, "spec_path")]
+#[oxapi(framework, "spec_path", unwrap)]
+#[oxapi(framework, "spec_path", ok_suffix = "Response", err_suffix = "Error")]
+#[oxapi(framework, "spec_path", derive = (Debug, Clone))]
+```
+
+### Arguments
+
+- `framework`: Web framework (`axum` only currently)
+- `spec_path`: Path to OpenAPI spec (JSON/YAML), relative to Cargo.toml
+- `unwrap`: Emit contents without module wrapper
+- `ok_suffix`: Success response type suffix (default: `"Response"`)
+- `err_suffix`: Error response type suffix (default: `"Error"`)
+- `derive`: Default derives for response enums (default: `(Debug)`)
+
+## Usage Modes
+
+### Single Trait Mode
+
+Types generated in sibling `{trait_name}_types` module:
+
+```rust
+#[oxapi::oxapi(axum, "spec.json")]
+trait PetService<S> {
+    #[oxapi(map)]
+    fn map_routes(router: Router<S>) -> Router<S>;
+
+    #[oxapi(get, "/pet/{petId}")]
+    async fn get_pet(state: State<S>, pet_id: Path<_>);
+}
+```
+
+### Module Mode
+
+Types generated in shared `types` submodule. Useful for splitting by responsibility:
+
+```rust
+#[oxapi::oxapi(axum, "spec.json")]
+mod api {
+    trait PetService<S> {
+        #[oxapi(map)]
+        fn map_routes(router: Router<S>) -> Router<S>;
+
+        #[oxapi(get, "/pet/{petId}")]
+        async fn get_pet(state: State<S>, pet_id: Path<_>);
+    }
+
+    trait StoreService<S> {
+        #[oxapi(map)]
+        fn map_routes(router: Router<S>) -> Router<S>;
+
+        #[oxapi(get, "/store/inventory")]
+        async fn get_inventory(state: State<S>);
+    }
+}
+```
+
+## Method Attributes
+
+### `#[oxapi(map)]`
+
+Route mapper method. Must have signature `fn map_routes(router: Router<S>) -> Router<S>`. Body auto-generated.
+
+### `#[oxapi(method, "path")]`
+
+Maps method to OpenAPI operation. Methods: `get`, `post`, `put`, `delete`, `patch`, `head`, `options`.
+
+```rust
+#[oxapi(get, "/pet/{petId}")]
+async fn get_pet(state: State<S>, pet_id: Path<_>);
+
+#[oxapi(post, "/pet")]
+async fn add_pet(state: State<S>, body: Json<_>);
+```
+
+### `#[oxapi(spec, "endpoint_path")]`
+
+Serves embedded OpenAPI spec. Method must be bare (no params, no return, not async):
+
+```rust
+#[oxapi(spec, "/openapi.yaml")]
+fn spec();
+// Generates: fn spec() -> &'static str { include_str!("...") }
+```
+
+## Type Elision
+
+Use `_` to infer types from spec:
+
+- `Path<_>` → Path parameters (single type or tuple)
+- `Query<_>` → Generated `{OperationId}Query` struct
+- `Json<_>` → Request body schema
+- `State<S>` → Passed through unchanged
+
+```rust
+#[oxapi(get, "/pet/{petId}")]
+async fn get_pet(
+    state: State<S>,       // Unchanged
+    pet_id: Path<_>,       // Becomes Path<i64>
+    query: Query<_>,       // Becomes Query<GetPetQuery>
+);
+```
+
+## Custom Extractors
+
+Parameters with explicit types pass through unchanged:
+
+```rust
+#[oxapi(post, "/items")]
+async fn create_item(
+    state: State<S>,
+    claims: Jwt<AppClaims>,    // Custom extractor - unchanged
+    body: Json<_>,              // Inferred from spec
+);
+```
+
+### Parameter Role Attributes
+
+Use `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` when extractor name isn't recognized:
+
+```rust
+#[oxapi(get, "/items/{id}")]
+async fn get_item(
+    state: State<S>,
+    #[oxapi(path)] id: MyPathExtractor<_>,
+    #[oxapi(query)] q: MyQueryExtractor<_>,
+);
+```
+
+**Important**: When ANY parameter has explicit role attr, inference disabled for ALL parameters.
+
+### Capturing Unknown Query Parameters
+
+Use `#[oxapi(query, field_name)]` to capture query params not in spec:
+
+```rust
+#[oxapi(get, "/search")]
+async fn search(
+    state: State<S>,
+    #[oxapi(query, extras)] q: Query<_>,
+);
+// Generates: #[serde(flatten)] pub extras: HashMap<String, String>
+```
+
+## Generated Types
+
+For each operation:
+
+- `{OperationId}{ok_suffix}` - Success response enum (2xx)
+- `{OperationId}{err_suffix}` - Error response enum (4xx, 5xx, default)
+- `{OperationId}Query` - Query parameters struct
+- `{OperationId}Path` - Path parameters struct
+
+All response enums implement `axum::response::IntoResponse`.
+
+## Type Customization
+
+### Schema Type Conversion
+
+Replace JSON schema constructs with custom types:
+
+```rust
+#[oxapi(axum, "spec.json")]
+#[convert(into = uuid::Uuid, type = "string", format = "uuid")]
+#[convert(into = rust_decimal::Decimal, type = "number")]
+mod api {
+    // All type="string", format="uuid" become uuid::Uuid
+    // All type="number" become rust_decimal::Decimal
+}
+```
+
+Fields: `into` (required), `type`, `format`
+
+### Schema Type Rename/Derive
+
+```rust
+#[oxapi(axum, "spec.json")]
+mod api {
+    // Rename "Veggie" to "Vegetable"
+    #[oxapi(Veggie)]
+    struct Vegetable;
+
+    // Add derives
+    #[oxapi(Veggie)]
+    #[derive(PartialEq, Eq, Hash)]
+    struct Vegetable;
+}
+```
+
+### Schema Type Replacement
+
+```rust
+#[oxapi(axum, "spec.json")]
+mod api {
+    #[oxapi]
+    type Ipv6Cidr = my_networking::Ipv6Cidr;
+}
+```
+
+### Generated Type Customization
+
+Rename/replace response/query/path types using operation coordinates:
+
+```rust
+#[oxapi(axum, "spec.json")]
+mod api {
+    // Rename
+    #[oxapi(get, "/pet/{petId}", ok)]
+    struct PetResponse;
+
+    #[oxapi(get, "/pet/{petId}", err)]
+    struct PetError;
+
+    #[oxapi(get, "/pet/findByStatus", query)]
+    struct PetSearchParams;
+
+    // Replace with custom type
+    #[oxapi(get, "/pet/{petId}", ok)]
+    type _ = my_types::PetResponse;
+}
+```
+
+Kind values: `ok`, `err`, `query`, `path`
+
+### Enum Variant Renaming
+
+```rust
+#[oxapi(axum, "spec.json")]
+mod api {
+    #[oxapi(get, "/pet/{petId}", err)]
+    enum PetError {
+        #[oxapi(status = 401)]
+        Unauthorized,
+        #[oxapi(status = 404)]
+        NotFound,
+    }
+    // Generates: enum PetError { Unauthorized(...), NotFound(...), Status500(...) }
+}
+```
+
+### Inline Type Naming
+
+For inline schemas (not `$ref`), specify type name in variant:
+
+```rust
+#[oxapi(get, "/store/inventory", ok)]
+enum InventoryResponse {
+    #[oxapi(status = 200)]
+    Success(Inventory),  // Inline struct named "Inventory"
+}
+```
+
+### Attribute Pass-Through
+
+Non-oxapi attributes pass through. Custom `#[derive(...)]` overrides defaults:
+
+```rust
+#[oxapi(get, "/pet/{petId}", err)]
+#[derive(Debug, thiserror::Error)]
+enum PetError {
+    #[oxapi(status = 401)]
+    #[error("Unauthorized")]
+    Unauthorized,
+
+    #[oxapi(status = 404)]
+    #[error("Not found: {0}")]
+    NotFound(String),
+}
+```
+
+## Project Structure
+
+```
+crates/
+  oxapi/           # Main crate (re-exports macro)
+  oxapi-macro/     # Proc macro implementation
+  oxapi-impl/      # Core generation logic
+examples/
+  petstore/        # Example using petstore spec
+```
+
+### Key Files
+
+- `crates/oxapi-macro/src/lib.rs` - Macro entry point, attribute parsing
+- `crates/oxapi-impl/src/lib.rs` - Generator builder, public API
+- `crates/oxapi-impl/src/types.rs` - Schema type generation
+- `crates/oxapi-impl/src/responses.rs` - Response enum generation
+- `crates/oxapi-impl/src/method.rs` - Method signature transformation
+- `crates/oxapi-impl/src/openapi.rs` - OpenAPI spec parsing utilities

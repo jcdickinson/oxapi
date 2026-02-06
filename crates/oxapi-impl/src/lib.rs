@@ -51,6 +51,8 @@ pub enum GeneratedTypeKind {
     Err,
     /// Query parameters struct ({Op}Query)
     Query,
+    /// Path parameters struct ({Op}Path)
+    Path,
 }
 
 /// Key for looking up type overrides.
@@ -90,10 +92,19 @@ pub enum TypeOverride {
     Replace(TokenStream),
 }
 
+/// Key for query unknown field storage.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct QueryUnknownFieldKey {
+    method: HttpMethod,
+    path: String,
+}
+
 /// Collection of type overrides for generated types.
 #[derive(Debug, Clone, Default)]
 pub struct TypeOverrides {
     overrides: HashMap<TypeOverrideKey, TypeOverride>,
+    /// Unknown field names for query structs, set via `#[oxapi(query, field_name)]`.
+    query_unknown_fields: HashMap<QueryUnknownFieldKey, proc_macro2::Ident>,
 }
 
 impl TypeOverrides {
@@ -183,6 +194,36 @@ impl TypeOverrides {
     /// Check if there's a replacement for this operation/kind.
     pub fn is_replaced(&self, method: HttpMethod, path: &str, kind: GeneratedTypeKind) -> bool {
         matches!(self.get(method, path, kind), Some(TypeOverride::Replace(_)))
+    }
+
+    /// Set the unknown field name for a query struct.
+    ///
+    /// This is used when `#[oxapi(query, field_name)]` is specified on a parameter.
+    pub fn set_query_unknown_field(
+        &mut self,
+        method: HttpMethod,
+        path: impl Into<String>,
+        field_name: proc_macro2::Ident,
+    ) {
+        self.query_unknown_fields.insert(
+            QueryUnknownFieldKey {
+                method,
+                path: path.into(),
+            },
+            field_name,
+        );
+    }
+
+    /// Get the unknown field name for a query struct, if set.
+    pub fn get_query_unknown_field(
+        &self,
+        method: HttpMethod,
+        path: &str,
+    ) -> Option<&proc_macro2::Ident> {
+        self.query_unknown_fields.get(&QueryUnknownFieldKey {
+            method,
+            path: path.to_string(),
+        })
     }
 }
 
@@ -341,9 +382,26 @@ impl Generator {
     pub fn generate_query_structs(&self) -> TokenStream {
         let mut structs = Vec::new();
         for op in self.spec.operations() {
-            if let Some((_, definition)) = self
-                .type_gen
-                .generate_query_struct(op, &self.type_overrides)
+            // Check if there's an unknown field specified for this operation's query struct
+            let unknown_field = self
+                .type_overrides
+                .get_query_unknown_field(op.method, &op.path);
+            if let Some((_, definition)) =
+                self.type_gen
+                    .generate_query_struct(op, &self.type_overrides, unknown_field)
+            {
+                structs.push(definition);
+            }
+        }
+        quote::quote! { #(#structs)* }
+    }
+
+    /// Generate path parameter structs for all operations.
+    pub fn generate_path_structs(&self) -> TokenStream {
+        let mut structs = Vec::new();
+        for op in self.spec.operations() {
+            if let Some((_, definition)) =
+                self.type_gen.generate_path_struct(op, &self.type_overrides)
             {
                 structs.push(definition);
             }

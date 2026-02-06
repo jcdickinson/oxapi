@@ -134,6 +134,10 @@ async fn get_user(id: Path<_>, body: Json<_>);
 //                      ^ i64        ^ User (from spec)
 ```
 
+## For AI Agents
+
+See [llms.txt](./llms.txt) for comprehensive documentation optimized for LLMs.
+
 ## License
 
 LGPL-3.0

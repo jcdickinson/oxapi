@@ -156,10 +156,10 @@ struct PetServiceImpl;
 impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
     async fn get_pet_by_id(
         State(state): State<S>,
-        Path(pet_id): Path<i64>,
+        Path(path): Path<GetPetByIdPath>,
     ) -> Result<GetPetByIdResponse, GetPetByIdError> {
         let pets = state.pets().read().await;
-        match pets.get(&pet_id) {
+        match pets.get(&path.pet_id) {
             Some(pet) => Ok(GetPetByIdResponse::Status200(pet.clone())),
             None => Err(GetPetByIdError::Status404),
         }
@@ -198,9 +198,9 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn delete_pet(
         State(state): State<S>,
-        Path(pet_id): Path<i64>,
+        Path(path): Path<DeletePetPath>,
     ) -> Result<DeletePetResponse, DeletePetError> {
-        state.pets().write().await.remove(&pet_id);
+        state.pets().write().await.remove(&path.pet_id);
         Ok(DeletePetResponse::Status200)
     }
 
@@ -241,11 +241,11 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn update_pet_with_form(
         State(state): State<S>,
-        Path(pet_id): Path<i64>,
+        Path(path): Path<UpdatePetWithFormPath>,
         Query(query): Query<UpdatePetWithFormQuery>,
     ) -> Result<UpdatePetWithFormResponse, UpdatePetWithFormError> {
         let mut pets = state.pets().write().await;
-        if let Some(pet) = pets.get_mut(&pet_id) {
+        if let Some(pet) = pets.get_mut(&path.pet_id) {
             if let Some(name) = query.name {
                 pet.name = name;
             }
@@ -265,7 +265,7 @@ impl<S: PetStateProvider> PetService<S> for PetServiceImpl {
 
     async fn upload_file(
         State(_state): State<S>,
-        Path(_pet_id): Path<i64>,
+        Path(_path): Path<UploadFilePath>,
         Query(_query): Query<UploadFileQuery>,
     ) -> Result<UploadFileResponse, UploadFileError> {
         Ok(UploadFileResponse::Status200(ApiResponse {
@@ -313,10 +313,10 @@ impl StoreService for StoreServiceImpl {
 
     async fn get_order_by_id(
         State(state): State<StoreState>,
-        Path(order_id): Path<i64>,
+        Path(path): Path<GetOrderByIdPath>,
     ) -> Result<GetOrderByIdResponse, GetOrderByIdError> {
         let orders = state.orders.read().await;
-        match orders.get(&order_id) {
+        match orders.get(&path.order_id) {
             Some(order) => Ok(GetOrderByIdResponse::Status200(order.clone())),
             None => Err(GetOrderByIdError::Status404),
         }
@@ -324,10 +324,10 @@ impl StoreService for StoreServiceImpl {
 
     async fn delete_order(
         State(state): State<StoreState>,
-        Path(order_id): Path<i64>,
+        Path(path): Path<DeleteOrderPath>,
     ) -> Result<DeleteOrderResponse, DeleteOrderError> {
         let mut orders = state.orders.write().await;
-        if orders.remove(&order_id).is_some() {
+        if orders.remove(&path.order_id).is_some() {
             Ok(DeleteOrderResponse::Status200)
         } else {
             Err(DeleteOrderError::Status404)
@@ -404,10 +404,10 @@ impl UserService for UserServiceImpl {
 
     async fn get_user_by_name(
         State(state): State<UserState>,
-        Path(username): Path<String>,
+        Path(path): Path<GetUserByNamePath>,
     ) -> Result<GetUserByNameResponse, GetUserByNameError> {
         let users = state.users.read().await;
-        match users.get(&username) {
+        match users.get(&path.username) {
             Some(user) => Ok(GetUserByNameResponse::Status200(user.clone())),
             None => Err(GetUserByNameError::Status404),
         }
@@ -415,20 +415,20 @@ impl UserService for UserServiceImpl {
 
     async fn update_user(
         State(state): State<UserState>,
-        Path(username): Path<String>,
+        Path(path): Path<UpdateUserPath>,
         Json(user): Json<User>,
     ) -> Result<UpdateUserResponse, UpdateUserError> {
         let mut users = state.users.write().await;
-        users.insert(username, user);
+        users.insert(path.username, user);
         Ok(UpdateUserResponse::Status200)
     }
 
     async fn delete_user(
         State(state): State<UserState>,
-        Path(username): Path<String>,
+        Path(path): Path<DeleteUserPath>,
     ) -> Result<DeleteUserResponse, DeleteUserError> {
         let mut users = state.users.write().await;
-        if users.remove(&username).is_some() {
+        if users.remove(&path.username).is_some() {
             Ok(DeleteUserResponse::Status200)
         } else {
             Err(DeleteUserError::Status404)

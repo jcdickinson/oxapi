@@ -10,12 +10,16 @@ use crate::types::TypeGenerator;
 use crate::{GeneratedTypeKind, Generator, TypeOverride};
 
 /// Role of a parameter in a handler function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamRole {
     /// Path parameters (e.g., `/items/{id}`)
     Path,
     /// Query parameters (e.g., `?foo=bar`)
-    Query,
+    /// The optional `unknown_field` specifies a field name for capturing unknown query params
+    /// via `#[serde(flatten)]` with a `HashMap<String, String>`.
+    Query {
+        unknown_field: Option<proc_macro2::Ident>,
+    },
     /// Request body
     Body,
     /// Other extractors (State, custom extractors, etc.)
@@ -154,7 +158,7 @@ impl<'a> MethodTransformer<'a> {
             .map(|(idx, pat_type)| {
                 // Explicit attr always applies
                 if let Some(Some(role)) = param_roles.get(idx) {
-                    return *role;
+                    return role.clone();
                 }
                 // If any explicit attr is present, don't infer - use Other
                 if has_any_explicit {
@@ -170,7 +174,7 @@ impl<'a> MethodTransformer<'a> {
         for (idx, pat_type) in all_params.iter().enumerate() {
             let pat = &pat_type.pat;
             let ty = &pat_type.ty;
-            let role = roles.get(idx).copied().unwrap_or(ParamRole::Other);
+            let role = roles.get(idx).cloned().unwrap_or(ParamRole::Other);
 
             let transformed_ty = self.transform_type_with_role(ty, op, type_gen, role)?;
             transformed.push(quote! { #pat: #transformed_ty });
@@ -213,9 +217,11 @@ impl<'a> MethodTransformer<'a> {
                     .ok_or_else(|| syn::Error::new_spanned(ty, "empty type path"))?;
 
                 // Infer the inner type based on the role
-                let inner_type = match role {
-                    ParamRole::Path => type_gen.generate_path_type(op),
-                    ParamRole::Query => self.generate_query_inner_type(op, type_gen),
+                let inner_type = match &role {
+                    ParamRole::Path => self.generate_path_inner_type(op, type_gen),
+                    ParamRole::Query { unknown_field } => {
+                        self.generate_query_inner_type(op, type_gen, unknown_field.clone())
+                    }
                     ParamRole::Body => self.generate_body_inner_type(op, type_gen),
                     ParamRole::Other => {
                         // Other role: pass through unchanged (State, custom extractors, etc.)
@@ -242,8 +248,37 @@ impl<'a> MethodTransformer<'a> {
         }
     }
 
+    /// Generate the inner type for a path parameter.
+    fn generate_path_inner_type(&self, op: &Operation, type_gen: &TypeGenerator) -> TokenStream {
+        let types_mod = self.types_mod;
+        let overrides = self.generator.type_overrides();
+
+        // Check for replacement first
+        if let Some(TypeOverride::Replace(replacement)) =
+            overrides.get(op.method, &op.path, GeneratedTypeKind::Path)
+        {
+            return replacement.clone();
+        }
+
+        // Generate a path struct if the operation has path params
+        if let Some((name, _)) = type_gen.generate_path_struct(op, overrides) {
+            quote! { #types_mod::#name }
+        } else {
+            // No path params - return unit type
+            quote! { () }
+        }
+    }
+
     /// Generate the inner type for a query parameter.
-    fn generate_query_inner_type(&self, op: &Operation, type_gen: &TypeGenerator) -> TokenStream {
+    ///
+    /// If `unknown_field` is provided, the generated query struct will include an extra
+    /// `#[serde(flatten)] pub <name>: HashMap<String, String>` field.
+    fn generate_query_inner_type(
+        &self,
+        op: &Operation,
+        type_gen: &TypeGenerator,
+        unknown_field: Option<proc_macro2::Ident>,
+    ) -> TokenStream {
         let types_mod = self.types_mod;
         let overrides = self.generator.type_overrides();
 
@@ -255,7 +290,9 @@ impl<'a> MethodTransformer<'a> {
         }
 
         // Generate a query struct if the operation has query params
-        if let Some((name, _)) = type_gen.generate_query_struct(op, overrides) {
+        if let Some((name, _)) =
+            type_gen.generate_query_struct(op, overrides, unknown_field.as_ref())
+        {
             quote! { #types_mod::#name }
         } else {
             // Fallback to HashMap<String, String> for operations without query params
@@ -323,7 +360,11 @@ fn detect_role_from_type(ty: &Type) -> ParamRole {
         let name = last.ident.to_string();
         match name.as_str() {
             "Path" => return ParamRole::Path,
-            "Query" => return ParamRole::Query,
+            "Query" => {
+                return ParamRole::Query {
+                    unknown_field: None,
+                };
+            }
             "Json" => return ParamRole::Body,
             _ => {}
         }

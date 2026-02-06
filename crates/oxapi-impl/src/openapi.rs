@@ -200,14 +200,18 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// Get the raw operation name (without case conversion).
+    ///
+    /// Uses the `operation_id` if available, otherwise falls back to the path.
+    pub fn raw_name(&self) -> &str {
+        self.operation_id.as_deref().unwrap_or(&self.path)
+    }
+
     /// Get the operation name in PascalCase.
     ///
     /// Uses the `operation_id` if available, otherwise falls back to the path.
     pub fn name(&self) -> String {
-        self.operation_id
-            .as_deref()
-            .unwrap_or(&self.path)
-            .to_upper_camel_case()
+        self.raw_name().to_upper_camel_case()
     }
 
     /// Check if this operation has any error responses defined (4xx, 5xx, or default).

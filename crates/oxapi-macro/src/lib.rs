@@ -152,65 +152,10 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// );
 /// ```
 ///
-/// # Parameter Role Attributes
-///
-/// Use `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` on method parameters to
-/// explicitly specify their role. This is useful when using custom extractors that oxapi
-/// cannot identify by name:
-///
-/// ```ignore
-/// #[oxapi(get, "/items/{id}")]
-/// async fn get_item(
-///     state: State<S>,
-///     #[oxapi(path)] id: MyCustomPathExtractor<_>,  // Infers inner type from path params
-/// );
-///
-/// #[oxapi(get, "/items/search")]
-/// async fn search(
-///     state: State<S>,
-///     #[oxapi(query)] params: MyQuery<_>,  // Infers inner type as query struct
-/// );
-///
-/// #[oxapi(post, "/items")]
-/// async fn create(
-///     state: State<S>,
-///     #[oxapi(body)] payload: MyBody<_>,  // Infers inner type from request body
-/// );
-/// ```
-///
-/// **Important**: When ANY parameter has an explicit role attribute, type name inference
-/// is disabled for ALL parameters. This means you must either:
-/// - Use no explicit attrs (rely entirely on type name detection), OR
-/// - Use explicit attrs on ALL parameters that need type elision
-///
-/// ```ignore
-/// // GOOD: No explicit attrs - all types detected by name
-/// #[oxapi(put, "/items/{id}")]
-/// async fn update(state: State<S>, path: Path<_>, body: Json<_>);
-///
-/// // GOOD: Explicit attrs on all params with type elision
-/// #[oxapi(put, "/items/{id}")]
-/// async fn update(
-///     state: State<S>,
-///     #[oxapi(path)] path: MyPath<_>,
-///     #[oxapi(body)] body: Json<_>,
-/// );
-///
-/// // BAD: Mixed - Json<_> won't be inferred because path has explicit attr
-/// #[oxapi(put, "/items/{id}")]
-/// async fn update(
-///     state: State<S>,
-///     #[oxapi(path)] path: MyPath<_>,
-///     body: Json<_>,  // ERROR: `_` not allowed without inference
-/// );
-/// ```
-///
-/// This behavior enables non-standard use cases like adding a body to a GET request:
-///
 /// # Custom Extractors
 ///
-/// Extractors with explicit types (no `_` elision) are passed through unchanged into the
-/// generated trait. This allows adding authentication, state, or other custom extractors:
+/// Parameters with explicit types (no `_` elision) are passed through unchanged.
+/// This allows adding authentication, state, or other custom extractors:
 ///
 /// ```ignore
 /// #[oxapi(post, "/items")]
@@ -221,11 +166,35 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// );
 /// ```
 ///
-/// The macro only transforms parameters that:
-/// 1. Have type elision (`_` as a type parameter), AND
-/// 2. Are recognized extractors (by name or explicit `#[oxapi(...)]` attribute)
+/// ## Parameter Role Attributes
 ///
-/// All other parameters are copied unchanged to the generated trait.
+/// Use `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` on parameters when
+/// the extractor name isn't recognized (`Path`, `Query`, `Json`):
+///
+/// ```ignore
+/// #[oxapi(get, "/items/{id}")]
+/// async fn get_item(
+///     state: State<S>,
+///     #[oxapi(path)] id: MyPathExtractor<_>,   // Infers type from path params
+///     #[oxapi(query)] q: MyQueryExtractor<_>,  // Infers type as query struct
+/// );
+/// ```
+///
+/// **Note**: When ANY parameter has an explicit role attribute, inference is disabled
+/// for ALL parameters. Use explicit attrs on all params that need type elision.
+///
+/// ## Capturing Unknown Query Parameters
+///
+/// Use `#[oxapi(query, field_name)]` to capture query parameters not in the spec:
+///
+/// ```ignore
+/// #[oxapi(get, "/search")]
+/// async fn search(
+///     state: State<S>,
+///     #[oxapi(query, extras)] q: Query<_>,
+/// );
+/// // Generates SearchQuery with: #[serde(flatten)] pub extras: HashMap<String, String>
+/// ```
 ///
 /// # Generated Types
 ///
@@ -234,6 +203,7 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// - `{OperationId}{ok_suffix}` - Enum with success response variants (2xx status codes), default suffix is `Response`
 /// - `{OperationId}{err_suffix}` - Enum with error response variants (4xx, 5xx, default), default suffix is `Error`
 /// - `{OperationId}Query` - Struct for query parameters (if operation has query params)
+/// - `{OperationId}Path` - Struct for path parameters (if operation has path params)
 ///
 /// All response enums implement `axum::response::IntoResponse`.
 ///
@@ -389,6 +359,7 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// - `ok` - Success response enum (`{OperationId}{ok_suffix}`, default: `{OperationId}Response`). Supports variant renames with enum syntax.
 /// - `err` - Error response enum (`{OperationId}{err_suffix}`, default: `{OperationId}Error`). Supports variant renames with enum syntax.
 /// - `query` - Query parameters struct (`{OperationId}Query`)
+/// - `path` - Path parameters struct (`{OperationId}Path`)
 ///
 /// # Complete Example
 ///
@@ -463,12 +434,20 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
 
     // Try to parse as trait first, then as module
     if let Ok(trait_item) = syn::parse2::<ItemTrait>(item.clone()) {
+        // Collect query unknown fields from the trait before creating Generator
+        let query_unknown_fields = collect_query_unknown_fields_from_trait(&trait_item)?;
+        let mut overrides = oxapi_impl::TypeOverrides::new();
+        for (method, path, field_name) in query_unknown_fields {
+            overrides.set_query_unknown_field(method, path, field_name);
+        }
+
         // Load the OpenAPI spec with default settings for traits
         let spec_path = resolve_spec_path(&args.spec_path)?;
         let generator = oxapi_impl::Generator::builder_from_file(&spec_path)
             .map_err(|e| {
                 syn::Error::new(args.spec_path.span(), format!("failed to load spec: {}", e))
             })?
+            .type_overrides(overrides)
             .response_suffixes(response_suffixes)
             .build()
             .map_err(|e| {
@@ -478,7 +457,18 @@ fn do_oxapi(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2>
         processor.generate()
     } else if let Ok(mod_item) = syn::parse2::<ItemMod>(item) {
         // Parse convert attributes from module and build settings
-        let (settings, overrides, schema_renames) = build_type_settings(&mod_item)?;
+        let (settings, mut overrides, schema_renames) = build_type_settings(&mod_item)?;
+
+        // Collect query unknown fields from all traits in the module
+        let content = mod_item
+            .content
+            .as_ref()
+            .map(|(_, items)| items.as_slice())
+            .unwrap_or(&[]);
+        let query_unknown_fields = collect_query_unknown_fields_from_module(content)?;
+        for (method, path, field_name) in query_unknown_fields {
+            overrides.set_query_unknown_field(method, path, field_name);
+        }
 
         // Convert to HashMap<String, String> for the generator (original_name -> new_name)
         let schema_renames_for_gen: std::collections::HashMap<String, String> = schema_renames
@@ -925,6 +915,7 @@ impl TraitProcessor {
         let types = self.generator.generate_types();
         let responses = self.generator.generate_responses();
         let query_structs = self.generator.generate_query_structs();
+        let path_structs = self.generator.generate_path_structs();
 
         // Generate transformed methods using shared helper
         let transformed_methods =
@@ -958,6 +949,7 @@ impl TraitProcessor {
                 #types
                 #responses
                 #query_structs
+                #path_structs
             }
 
             #trait_def
@@ -1068,6 +1060,7 @@ impl ModuleProcessor {
         let types = self.generator.generate_types();
         let responses = self.generator.generate_responses();
         let query_structs = self.generator.generate_query_structs();
+        let path_structs = self.generator.generate_path_structs();
 
         // Generate each trait using the shared helper
         let types_mod_name = syn::Ident::new("types", proc_macro2::Span::call_site());
@@ -1113,6 +1106,7 @@ impl ModuleProcessor {
                 #types
                 #responses
                 #query_structs
+                #path_structs
             }
 
             #(#generated_traits)*
@@ -1356,9 +1350,13 @@ fn parse_type_kind(ident: &Ident) -> syn::Result<oxapi_impl::GeneratedTypeKind> 
         "ok" => Ok(oxapi_impl::GeneratedTypeKind::Ok),
         "err" => Ok(oxapi_impl::GeneratedTypeKind::Err),
         "query" => Ok(oxapi_impl::GeneratedTypeKind::Query),
+        "path" => Ok(oxapi_impl::GeneratedTypeKind::Path),
         other => Err(syn::Error::new(
             ident.span(),
-            format!("unknown type kind: {} (expected ok, err, or query)", other),
+            format!(
+                "unknown type kind: {} (expected ok, err, query, or path)",
+                other
+            ),
         )),
     }
 }
@@ -1575,11 +1573,15 @@ fn find_derives(attrs: &[syn::Attribute]) -> syn::Result<Vec<syn::Path>> {
     Ok(derives)
 }
 
-/// Parameter role attribute: `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Parameter role attribute: `#[oxapi(path)]`, `#[oxapi(query)]`, `#[oxapi(query, field_name)]`, or `#[oxapi(body)]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ParamOxapiAttr {
     Path,
-    Query,
+    /// Query with optional unknown field name for capturing extra query params.
+    /// e.g., `#[oxapi(query, extras)]` adds a `#[serde(flatten)] pub extras: HashMap<String, String>` field.
+    Query {
+        unknown_field: Option<Ident>,
+    },
     Body,
 }
 
@@ -1588,7 +1590,16 @@ impl syn::parse::Parse for ParamOxapiAttr {
         let ident: Ident = input.parse()?;
         match ident.to_string().as_str() {
             "path" => Ok(ParamOxapiAttr::Path),
-            "query" => Ok(ParamOxapiAttr::Query),
+            "query" => {
+                // Check for optional unknown field name: #[oxapi(query, field_name)]
+                let unknown_field = if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                    Some(input.parse::<Ident>()?)
+                } else {
+                    None
+                };
+                Ok(ParamOxapiAttr::Query { unknown_field })
+            }
             "body" => Ok(ParamOxapiAttr::Body),
             other => Err(syn::Error::new(
                 ident.span(),
@@ -1604,6 +1615,53 @@ impl syn::parse::Parse for ParamOxapiAttr {
 /// Find `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` attribute on a parameter.
 fn find_param_oxapi_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<ParamOxapiAttr>> {
     find_single_oxapi_attr(attrs, |attr| attr.parse_args())
+}
+
+/// Collect all query unknown fields from traits in a module.
+///
+/// Returns a map of (HTTP method, path) → unknown field name.
+fn collect_query_unknown_fields_from_module(
+    items: &[syn::Item],
+) -> syn::Result<Vec<(oxapi_impl::HttpMethod, String, Ident)>> {
+    let mut fields = Vec::new();
+    for item in items {
+        if let syn::Item::Trait(t) = item {
+            fields.extend(collect_query_unknown_fields_from_trait(t)?);
+        }
+    }
+    Ok(fields)
+}
+
+/// Collect query unknown fields from a single trait.
+fn collect_query_unknown_fields_from_trait(
+    trait_item: &syn::ItemTrait,
+) -> syn::Result<Vec<(oxapi_impl::HttpMethod, String, Ident)>> {
+    let mut fields = Vec::new();
+    for item in &trait_item.items {
+        if let syn::TraitItem::Fn(method) = item {
+            // Check if this method has an #[oxapi(method, "/path")] attribute
+            if let Some(oxapi_attr) = find_oxapi_attr(&method.attrs)? {
+                if let OxapiAttr::Route {
+                    method: http_method,
+                    path,
+                } = oxapi_attr
+                {
+                    // Check parameters for #[oxapi(query, unknown_field)]
+                    for arg in &method.sig.inputs {
+                        if let syn::FnArg::Typed(pat_type) = arg {
+                            if let Some(ParamOxapiAttr::Query {
+                                unknown_field: Some(field_name),
+                            }) = find_param_oxapi_attr(&pat_type.attrs)?
+                            {
+                                fields.push((http_method, path.clone(), field_name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(fields)
 }
 
 /// Extract parameter roles from a method's parameters.
@@ -1626,7 +1684,9 @@ fn collect_param_roles(
                 if let Some(attr) = find_param_oxapi_attr(&pat_type.attrs)? {
                     let role = match attr {
                         ParamOxapiAttr::Path => oxapi_impl::ParamRole::Path,
-                        ParamOxapiAttr::Query => oxapi_impl::ParamRole::Query,
+                        ParamOxapiAttr::Query { unknown_field } => {
+                            oxapi_impl::ParamRole::Query { unknown_field }
+                        }
                         ParamOxapiAttr::Body => oxapi_impl::ParamRole::Body,
                     };
                     roles.push(Some(role));
