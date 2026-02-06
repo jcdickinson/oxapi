@@ -456,6 +456,88 @@ struct Rename<T> {
     new: T,
 }
 
+/// Process a struct item for schema renames or operation type renames.
+fn process_struct_item(
+    s: &syn::ItemStruct,
+    settings: &mut oxapi_impl::TypeSpaceSettings,
+    overrides: &mut oxapi_impl::TypeOverrides,
+    schema_renames: &mut std::collections::HashMap<String, Rename<Ident>>,
+) -> syn::Result<()> {
+    if let Some(oxapi_attr) = find_struct_oxapi_attr(&s.attrs)? {
+        match oxapi_attr {
+            StructOxapiAttr::Schema(original_ident) => {
+                // Schema type rename: #[oxapi(OriginalName)] struct NewName;
+                let original_name = original_ident.to_string();
+                let new_name = s.ident.to_string();
+                let mut patch = oxapi_impl::TypeSpacePatch::default();
+                patch.with_rename(&new_name);
+
+                for derive_path in find_derives(&s.attrs)? {
+                    patch.with_derive(derive_path.to_token_stream().to_string());
+                }
+
+                settings.with_patch(&original_name, &patch);
+                schema_renames.insert(
+                    original_name,
+                    Rename {
+                        original: original_ident,
+                        new: s.ident.clone(),
+                    },
+                );
+            }
+            StructOxapiAttr::Operation(op) => {
+                // Generated type rename: #[oxapi(get, "/path", ok)] struct NewName;
+                overrides.add_rename(op.method, op.path.value(), op.kind, s.ident.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Process an enum item for variant renames.
+fn process_enum_item(
+    e: &syn::ItemEnum,
+    overrides: &mut oxapi_impl::TypeOverrides,
+) -> syn::Result<()> {
+    if let Some(op) = find_enum_oxapi_attr(&e.attrs)? {
+        let attrs = extract_passthrough_attrs(&e.attrs);
+        let variant_overrides = parse_variant_overrides(&e.variants)?;
+        overrides.add_rename_with_overrides(
+            op.method,
+            op.path.value(),
+            op.kind,
+            e.ident.clone(),
+            attrs,
+            variant_overrides,
+        );
+    }
+    Ok(())
+}
+
+/// Process a type alias item for schema or operation type replacements.
+fn process_type_alias_item(
+    t: &syn::ItemType,
+    settings: &mut oxapi_impl::TypeSpaceSettings,
+    overrides: &mut oxapi_impl::TypeOverrides,
+) -> syn::Result<()> {
+    if let Some(oxapi_attr) = find_type_alias_oxapi_attr(&t.attrs)? {
+        match oxapi_attr {
+            TypeAliasOxapiAttr::Operation(op) => {
+                // Generated type replacement: #[oxapi(get, "/path", ok)] type _ = T;
+                let replacement = t.ty.to_token_stream();
+                overrides.add_replace(op.method, op.path.value(), op.kind, replacement);
+            }
+            TypeAliasOxapiAttr::Schema => {
+                // Schema type replacement: #[oxapi] type Name = T;
+                let type_name = t.ident.to_string();
+                let replace_type = t.ty.to_token_stream().to_string();
+                settings.with_replacement(&type_name, &replace_type, std::iter::empty());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build TypeSpaceSettings, TypeOverrides, and schema renames from module attributes and items.
 fn build_type_settings(
     mod_item: &ItemMod,
@@ -479,90 +561,15 @@ fn build_type_settings(
     if let Some((_, content)) = &mod_item.content {
         for item in content {
             match item {
-                // Struct with #[oxapi(...)] for renames
                 syn::Item::Struct(s) => {
-                    if let Some(oxapi_attr) = find_struct_oxapi_attr(&s.attrs)? {
-                        match oxapi_attr {
-                            StructOxapiAttr::Schema(original_ident) => {
-                                // Schema type rename: #[oxapi(OriginalName)] struct NewName;
-                                // The attribute specifies the schema name from OpenAPI,
-                                // the struct ident is what it gets renamed to.
-                                let original_name = original_ident.to_string();
-                                let new_name = s.ident.to_string();
-                                let mut patch = oxapi_impl::TypeSpacePatch::default();
-                                patch.with_rename(&new_name);
-
-                                // Also add any derives
-                                for derive_path in find_derives(&s.attrs)? {
-                                    patch.with_derive(derive_path.to_token_stream().to_string());
-                                }
-
-                                settings.with_patch(&original_name, &patch);
-                                schema_renames.insert(
-                                    original_name,
-                                    Rename {
-                                        original: original_ident,
-                                        new: s.ident.clone(),
-                                    },
-                                );
-                            }
-                            StructOxapiAttr::Operation(op) => {
-                                // Generated type rename: #[oxapi(get, "/path", ok)] struct NewName;
-                                overrides.add_rename(
-                                    op.method,
-                                    op.path.value(),
-                                    op.kind,
-                                    s.ident.clone(),
-                                );
-                            }
-                        }
-                    }
+                    process_struct_item(s, &mut settings, &mut overrides, &mut schema_renames)?;
                 }
-
-                // Enum with #[oxapi(method, "path", kind)] for variant renames
                 syn::Item::Enum(e) => {
-                    if let Some(op) = find_enum_oxapi_attr(&e.attrs)? {
-                        let attrs = extract_passthrough_attrs(&e.attrs);
-                        let variant_overrides = parse_variant_overrides(&e.variants)?;
-                        overrides.add_rename_with_overrides(
-                            op.method,
-                            op.path.value(),
-                            op.kind,
-                            e.ident.clone(),
-                            attrs,
-                            variant_overrides,
-                        );
-                    }
+                    process_enum_item(e, &mut overrides)?;
                 }
-
-                // Type alias with #[oxapi] or #[oxapi(method, path, kind)] for replacements
                 syn::Item::Type(t) => {
-                    if let Some(oxapi_attr) = find_type_alias_oxapi_attr(&t.attrs)? {
-                        match oxapi_attr {
-                            TypeAliasOxapiAttr::Operation(op) => {
-                                // Generated type replacement: #[oxapi(get, "/path", ok)] type _ = T;
-                                let replacement = t.ty.to_token_stream();
-                                overrides.add_replace(
-                                    op.method,
-                                    op.path.value(),
-                                    op.kind,
-                                    replacement,
-                                );
-                            }
-                            TypeAliasOxapiAttr::Schema => {
-                                // Schema type replacement: #[oxapi] type Name = T;
-                                let type_name = t.ident.to_string();
-                                let replace_type = t.ty.to_token_stream().to_string();
-                                settings.with_replacement(
-                                    &type_name,
-                                    &replace_type,
-                                    std::iter::empty(),
-                                );
-                            }
-                        }
-                    }
+                    process_type_alias_item(t, &mut settings, &mut overrides)?;
                 }
-
                 _ => {}
             }
         }
@@ -688,6 +695,123 @@ impl syn::parse::Parse for MacroArgs {
     }
 }
 
+/// Set tracking which operations are covered by a trait.
+type CoverageSet = std::collections::HashSet<(oxapi_impl::HttpMethod, String)>;
+
+/// Information extracted from a trait for code generation.
+struct TraitInfo<'a> {
+    trait_item: &'a ItemTrait,
+    map_method: Option<&'a syn::TraitItemFn>,
+    spec_method: Option<(&'a syn::TraitItemFn, String)>,
+    handler_methods: Vec<(&'a syn::TraitItemFn, oxapi_impl::HttpMethod, String)>,
+}
+
+/// Extract trait info from a trait, parsing all method attributes.
+/// Returns the TraitInfo and a set of covered operations.
+fn extract_trait_info<'a>(trait_item: &'a ItemTrait) -> syn::Result<(TraitInfo<'a>, CoverageSet)> {
+    let mut covered = CoverageSet::new();
+    let mut map_method: Option<&syn::TraitItemFn> = None;
+    let mut spec_method: Option<(&syn::TraitItemFn, String)> = None;
+    let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> = Vec::new();
+
+    for item in &trait_item.items {
+        if let syn::TraitItem::Fn(method) = item {
+            if let Some(attr) = find_oxapi_attr(&method.attrs)? {
+                match attr {
+                    OxapiAttr::Map => {
+                        map_method = Some(method);
+                    }
+                    OxapiAttr::Route {
+                        method: http_method,
+                        path,
+                    } => {
+                        covered.insert((http_method, path.clone()));
+                        handler_methods.push((method, http_method, path));
+                    }
+                    OxapiAttr::Spec { path } => {
+                        validate_bare_spec_method(method)?;
+                        covered.insert((oxapi_impl::HttpMethod::Get, path.clone()));
+                        spec_method = Some((method, path));
+                    }
+                }
+            } else {
+                return Err(syn::Error::new_spanned(
+                    method,
+                    "all trait methods must have #[oxapi(...)] attribute",
+                ));
+            }
+        }
+    }
+
+    let info = TraitInfo {
+        trait_item,
+        map_method,
+        spec_method,
+        handler_methods,
+    };
+
+    Ok((info, covered))
+}
+
+/// Generate transformed methods for a trait.
+fn generate_transformed_methods(
+    info: &TraitInfo<'_>,
+    generator: &oxapi_impl::Generator,
+    types_mod_name: &syn::Ident,
+    spec_path: &std::path::Path,
+) -> syn::Result<Vec<TokenStream2>> {
+    let mut transformed_methods = Vec::new();
+    let method_transformer = oxapi_impl::MethodTransformer::new(generator, types_mod_name);
+
+    // Generate map_routes if present
+    if let Some(map_fn) = info.map_method {
+        let map_body = oxapi_impl::RouterGenerator.generate_map_routes(
+            &info
+                .handler_methods
+                .iter()
+                .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
+                .collect::<Vec<_>>(),
+            info.spec_method
+                .as_ref()
+                .map(|(m, path)| (m.sig.ident.clone(), path.clone())),
+        );
+
+        let sig = &map_fn.sig;
+        transformed_methods.push(quote! {
+            #sig {
+                #map_body
+            }
+        });
+    }
+
+    // Generate handler methods
+    for (method, http_method, path) in &info.handler_methods {
+        let op = generator.get_operation(*http_method, path).ok_or_else(|| {
+            syn::Error::new_spanned(
+                method,
+                format!("operation not found: {} {}", http_method, path),
+            )
+        })?;
+
+        let param_roles = collect_param_roles(method)?;
+        let transformed = method_transformer.transform(method, op, &param_roles)?;
+        transformed_methods.push(transformed);
+    }
+
+    // Generate spec method if present
+    if let Some((method, _endpoint_path)) = &info.spec_method {
+        let method_name = &method.sig.ident;
+        let spec_file_path = spec_path.to_string_lossy();
+        transformed_methods.push(quote! {
+            fn #method_name() -> &'static str {
+                include_str!(#spec_file_path)
+            }
+        });
+    }
+
+    Ok(transformed_methods)
+}
+
 /// Processes a trait and generates the output.
 struct TraitProcessor {
     generator: oxapi_impl::Generator,
@@ -710,52 +834,14 @@ impl TraitProcessor {
     }
 
     fn generate(self) -> syn::Result<TokenStream2> {
-        use std::collections::HashMap;
-
         let trait_name = &self.trait_item.ident;
         let types_mod_name = syn::Ident::new(
             &format!("{}_types", heck::AsSnakeCase(trait_name.to_string())),
             trait_name.span(),
         );
 
-        // Parse all method attributes and collect coverage info
-        let mut covered: HashMap<(oxapi_impl::HttpMethod, String), ()> = HashMap::new();
-        let mut map_method: Option<&syn::TraitItemFn> = None;
-        let mut spec_method: Option<(&syn::TraitItemFn, String)> = None;
-        let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
-            Vec::new();
-
-        for item in &self.trait_item.items {
-            if let syn::TraitItem::Fn(method) = item {
-                if let Some(attr) = find_oxapi_attr(&method.attrs)? {
-                    match attr {
-                        OxapiAttr::Map => {
-                            map_method = Some(method);
-                        }
-                        OxapiAttr::Route {
-                            method: http_method,
-                            path,
-                        } => {
-                            covered.insert((http_method, path.clone()), ());
-                            handler_methods.push((method, http_method, path));
-                        }
-                        OxapiAttr::Spec { path } => {
-                            validate_bare_spec_method(method)?;
-                            // Spec routes count as GET coverage if the path exists in OpenAPI
-                            covered.insert((oxapi_impl::HttpMethod::Get, path.clone()), ());
-                            spec_method = Some((method, path));
-                        }
-                    }
-                } else {
-                    return Err(syn::Error::new_spanned(
-                        method,
-                        "all trait methods must have #[oxapi(...)] attribute",
-                    ));
-                }
-            }
-        }
-
-        // Validate coverage
+        // Extract trait info and validate coverage
+        let (info, covered) = extract_trait_info(&self.trait_item)?;
         self.generator
             .validate_coverage(&covered)
             .map_err(|e| syn::Error::new_spanned(&self.trait_item, e.to_string()))?;
@@ -765,57 +851,9 @@ impl TraitProcessor {
         let responses = self.generator.generate_responses();
         let query_structs = self.generator.generate_query_structs();
 
-        // Generate transformed methods
-        let mut transformed_methods = Vec::new();
-
-        // Generate map_routes if present
-        if let Some(map_fn) = map_method {
-            let map_body = oxapi_impl::RouterGenerator.generate_map_routes(
-                &handler_methods
-                    .iter()
-                    .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
-                    .collect::<Vec<_>>(),
-                spec_method
-                    .as_ref()
-                    .map(|(m, path)| (m.sig.ident.clone(), path.clone())),
-            );
-
-            let sig = &map_fn.sig;
-            transformed_methods.push(quote! {
-                #sig {
-                    #map_body
-                }
-            });
-        }
-
-        // Generate handler methods
-        let method_transformer =
-            oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
-        for (method, http_method, path) in &handler_methods {
-            let op = self
-                .generator
-                .get_operation(*http_method, path)
-                .ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        method,
-                        format!("operation not found: {} {}", http_method, path),
-                    )
-                })?;
-
-            let transformed = method_transformer.transform(method, op)?;
-            transformed_methods.push(transformed);
-        }
-
-        // Generate spec method if present
-        if let Some((method, _endpoint_path)) = &spec_method {
-            let method_name = &method.sig.ident;
-            let spec_file_path = self.spec_path.to_string_lossy();
-            transformed_methods.push(quote! {
-                fn #method_name() -> &'static str {
-                    include_str!(#spec_file_path)
-                }
-            });
-        }
+        // Generate transformed methods using shared helper
+        let transformed_methods =
+            generate_transformed_methods(&info, &self.generator, &types_mod_name, &self.spec_path)?;
 
         // Generate the full output
         let vis = &self.trait_item.vis;
@@ -823,7 +861,7 @@ impl TraitProcessor {
             .trait_item
             .attrs
             .iter()
-            .filter(|a| !a.path().is_ident("oxapi"))
+            .filter(|a| !is_oxapi_attr(a))
             .collect();
 
         // Preserve generic parameters from the original trait
@@ -899,8 +937,6 @@ impl ModuleProcessor {
     }
 
     fn generate(self) -> syn::Result<TokenStream2> {
-        use std::collections::HashMap;
-
         // Find all traits in the module, filtering out patch/replace items
         let mut traits: Vec<&ItemTrait> = Vec::new();
         let mut other_items: Vec<&syn::Item> = Vec::new();
@@ -925,72 +961,27 @@ impl ModuleProcessor {
             ));
         }
 
-        // Collect all operations across all traits for coverage validation
-        let mut all_covered: HashMap<(oxapi_impl::HttpMethod, String), ()> = HashMap::new();
-
-        // Process each trait and collect handler info
-        struct TraitInfo<'a> {
-            trait_item: &'a ItemTrait,
-            map_method: Option<&'a syn::TraitItemFn>,
-            spec_method: Option<(&'a syn::TraitItemFn, String)>,
-            handler_methods: Vec<(&'a syn::TraitItemFn, oxapi_impl::HttpMethod, String)>,
-        }
-
+        // Extract info from each trait and collect coverage
+        let mut all_covered = CoverageSet::new();
         let mut trait_infos: Vec<TraitInfo> = Vec::new();
 
         for trait_item in &traits {
-            let mut map_method: Option<&syn::TraitItemFn> = None;
-            let mut spec_method: Option<(&syn::TraitItemFn, String)> = None;
-            let mut handler_methods: Vec<(&syn::TraitItemFn, oxapi_impl::HttpMethod, String)> =
-                Vec::new();
+            let (info, covered) = extract_trait_info(trait_item)?;
 
-            for item in &trait_item.items {
-                if let syn::TraitItem::Fn(method) = item {
-                    if let Some(attr) = find_oxapi_attr(&method.attrs)? {
-                        match attr {
-                            OxapiAttr::Map => {
-                                map_method = Some(method);
-                            }
-                            OxapiAttr::Route {
-                                method: http_method,
-                                path,
-                            } => {
-                                // Check for duplicates across traits
-                                let key = (http_method, path.clone());
-                                if all_covered.contains_key(&key) {
-                                    return Err(syn::Error::new_spanned(
-                                        method,
-                                        format!(
-                                            "operation {} {} is already defined in another trait",
-                                            http_method, path
-                                        ),
-                                    ));
-                                }
-                                all_covered.insert(key, ());
-                                handler_methods.push((method, http_method, path));
-                            }
-                            OxapiAttr::Spec { path } => {
-                                validate_bare_spec_method(method)?;
-                                // Spec routes count as GET coverage if the path exists in OpenAPI
-                                all_covered.insert((oxapi_impl::HttpMethod::Get, path.clone()), ());
-                                spec_method = Some((method, path));
-                            }
-                        }
-                    } else {
-                        return Err(syn::Error::new_spanned(
-                            method,
-                            "all trait methods must have #[oxapi(...)] attribute",
-                        ));
-                    }
+            // Check for duplicates across traits
+            for key in &covered {
+                if all_covered.contains(key) {
+                    return Err(syn::Error::new_spanned(
+                        trait_item,
+                        format!(
+                            "operation {} {} is already defined in another trait",
+                            key.0, key.1
+                        ),
+                    ));
                 }
             }
-
-            trait_infos.push(TraitInfo {
-                trait_item,
-                map_method,
-                spec_method,
-                handler_methods,
-            });
+            all_covered.extend(covered);
+            trait_infos.push(info);
         }
 
         // Validate coverage against spec
@@ -1003,72 +994,26 @@ impl ModuleProcessor {
         let responses = self.generator.generate_responses();
         let query_structs = self.generator.generate_query_structs();
 
-        // Generate each trait
+        // Generate each trait using the shared helper
         let types_mod_name = syn::Ident::new("types", proc_macro2::Span::call_site());
-        let method_transformer =
-            oxapi_impl::MethodTransformer::new(&self.generator, &types_mod_name);
-
         let mut generated_traits = Vec::new();
 
         for info in &trait_infos {
             let trait_name = &info.trait_item.ident;
-            let _trait_vis = &info.trait_item.vis;
             let trait_attrs: Vec<_> = info
                 .trait_item
                 .attrs
                 .iter()
-                .filter(|a| !a.path().is_ident("oxapi"))
+                .filter(|a| !is_oxapi_attr(a))
                 .collect();
 
-            let mut transformed_methods = Vec::new();
-
-            // Generate map_routes if present
-            if let Some(map_fn) = info.map_method {
-                let map_body = oxapi_impl::RouterGenerator.generate_map_routes(
-                    &info
-                        .handler_methods
-                        .iter()
-                        .map(|(m, method, path)| (m.sig.ident.clone(), *method, path.clone()))
-                        .collect::<Vec<_>>(),
-                    info.spec_method
-                        .as_ref()
-                        .map(|(m, path)| (m.sig.ident.clone(), path.clone())),
-                );
-
-                let sig = &map_fn.sig;
-                transformed_methods.push(quote! {
-                    #sig {
-                        #map_body
-                    }
-                });
-            }
-
-            // Generate handler methods
-            for (method, http_method, path) in &info.handler_methods {
-                let op = self
-                    .generator
-                    .get_operation(*http_method, path)
-                    .ok_or_else(|| {
-                        syn::Error::new_spanned(
-                            method,
-                            format!("operation not found: {} {}", http_method, path),
-                        )
-                    })?;
-
-                let transformed = method_transformer.transform(method, op)?;
-                transformed_methods.push(transformed);
-            }
-
-            // Generate spec method if present
-            if let Some((method, _endpoint_path)) = &info.spec_method {
-                let method_name = &method.sig.ident;
-                let spec_file_path = self.spec_path.to_string_lossy();
-                transformed_methods.push(quote! {
-                    fn #method_name() -> &'static str {
-                        include_str!(#spec_file_path)
-                    }
-                });
-            }
+            // Generate transformed methods using shared helper
+            let transformed_methods = generate_transformed_methods(
+                info,
+                &self.generator,
+                &types_mod_name,
+                &self.spec_path,
+            )?;
 
             // Traits in module are always pub (for external use)
             // Preserve generic parameters from the original trait
@@ -1085,6 +1030,8 @@ impl ModuleProcessor {
 
         // Generate the output
         let inner = quote! {
+            #(#other_items)*
+
             pub mod #types_mod_name {
                 use super::*;
 
@@ -1447,11 +1394,16 @@ fn extract_inner_type_ident(fields: &syn::Fields) -> syn::Result<Option<syn::Ide
     }
 }
 
+/// Check if an attribute is an oxapi attribute.
+fn is_oxapi_attr(attr: &syn::Attribute) -> bool {
+    attr.path().is_ident("oxapi")
+}
+
 /// Extract all attributes except `#[oxapi(...)]` as TokenStreams.
 fn extract_passthrough_attrs(attrs: &[syn::Attribute]) -> Vec<proc_macro2::TokenStream> {
     attrs
         .iter()
-        .filter(|attr| !attr.path().is_ident("oxapi"))
+        .filter(|attr| !is_oxapi_attr(attr))
         .map(|attr| quote::quote! { #attr })
         .collect()
 }
@@ -1546,4 +1498,69 @@ fn find_derives(attrs: &[syn::Attribute]) -> syn::Result<Vec<syn::Path>> {
         }
     }
     Ok(derives)
+}
+
+/// Parameter role attribute: `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamOxapiAttr {
+    Path,
+    Query,
+    Body,
+}
+
+impl syn::parse::Parse for ParamOxapiAttr {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ident: Ident = input.parse()?;
+        match ident.to_string().as_str() {
+            "path" => Ok(ParamOxapiAttr::Path),
+            "query" => Ok(ParamOxapiAttr::Query),
+            "body" => Ok(ParamOxapiAttr::Body),
+            other => Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "unknown parameter attribute: {} (expected path, query, or body)",
+                    other
+                ),
+            )),
+        }
+    }
+}
+
+/// Find `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` attribute on a parameter.
+fn find_param_oxapi_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<ParamOxapiAttr>> {
+    find_single_oxapi_attr(attrs, |attr| attr.parse_args())
+}
+
+/// Extract parameter roles from a method's parameters.
+/// Returns a Vec with the same length as the method's inputs, with Some(role) for
+/// parameters that have an explicit `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]`
+/// attribute, and None for parameters without such attributes.
+fn collect_param_roles(
+    method: &syn::TraitItemFn,
+) -> syn::Result<Vec<Option<oxapi_impl::ParamRole>>> {
+    let mut roles = Vec::new();
+
+    for arg in &method.sig.inputs {
+        match arg {
+            syn::FnArg::Receiver(_) => {
+                // Receiver will be rejected later, just push None for now
+                roles.push(None);
+            }
+            syn::FnArg::Typed(pat_type) => {
+                // Check for #[oxapi(path)], #[oxapi(query)], or #[oxapi(body)]
+                if let Some(attr) = find_param_oxapi_attr(&pat_type.attrs)? {
+                    let role = match attr {
+                        ParamOxapiAttr::Path => oxapi_impl::ParamRole::Path,
+                        ParamOxapiAttr::Query => oxapi_impl::ParamRole::Query,
+                        ParamOxapiAttr::Body => oxapi_impl::ParamRole::Body,
+                    };
+                    roles.push(Some(role));
+                } else {
+                    roles.push(None);
+                }
+            }
+        }
+    }
+
+    Ok(roles)
 }

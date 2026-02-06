@@ -43,16 +43,5 @@ impl RouterGenerator {
 
 /// Get the axum routing function for an HTTP method.
 fn http_method_to_axum_fn(method: HttpMethod) -> syn::Ident {
-    format_ident!(
-        "{}",
-        match method {
-            HttpMethod::Get => "get",
-            HttpMethod::Post => "post",
-            HttpMethod::Put => "put",
-            HttpMethod::Delete => "delete",
-            HttpMethod::Patch => "patch",
-            HttpMethod::Head => "head",
-            HttpMethod::Options => "options",
-        }
-    )
+    format_ident!("{}", method.as_str())
 }

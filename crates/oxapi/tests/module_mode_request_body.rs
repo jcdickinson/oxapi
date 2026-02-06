@@ -8,10 +8,10 @@
 //! causing "cannot find type" errors since the types are defined in the `types`
 //! submodule.
 
-use axum::Router;
+mod common;
 
-/// Trait for types that can provide state dependencies.
-pub trait StateProvider: Clone + Send + Sync + 'static {}
+use axum::Router;
+use common::StateProvider;
 
 #[oxapi::oxapi(axum, "tests/module_mode_request_body.yaml")]
 pub mod api {

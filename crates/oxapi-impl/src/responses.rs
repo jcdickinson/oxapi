@@ -30,6 +30,15 @@ impl<'a> ResponseGenerator<'a> {
         }
     }
 
+    /// Check if a response matches the given kind (Ok for success codes, Err for error codes).
+    fn response_matches_kind(status: &ResponseStatus, kind: GeneratedTypeKind) -> bool {
+        match kind {
+            GeneratedTypeKind::Ok => status.is_success(),
+            GeneratedTypeKind::Err => status.is_error(),
+            GeneratedTypeKind::Query => false,
+        }
+    }
+
     /// Generate response enums for all operations.
     pub fn generate_all(&self) -> TokenStream {
         let enums: Vec<_> = self
@@ -72,16 +81,37 @@ impl<'a> ResponseGenerator<'a> {
         }
     }
 
-    /// Get the variant name for a status code, applying any rename override.
-    fn get_variant_name(&self, op: &Operation, status: u16, kind: GeneratedTypeKind) -> syn::Ident {
+    /// Get a value from a variant override, or return a default.
+    fn get_variant_override<T, F>(
+        &self,
+        op: &Operation,
+        status: u16,
+        kind: GeneratedTypeKind,
+        getter: F,
+        default: T,
+    ) -> T
+    where
+        F: FnOnce(&crate::VariantOverride) -> T,
+    {
         if let Some(TypeOverride::Rename {
             variant_overrides, ..
         }) = self.overrides.get(op.method, &op.path, kind)
             && let Some(ov) = variant_overrides.get(&status)
         {
-            return ov.name.clone();
+            return getter(ov);
         }
-        format_ident!("Status{}", status)
+        default
+    }
+
+    /// Get the variant name for a status code, applying any rename override.
+    fn get_variant_name(&self, op: &Operation, status: u16, kind: GeneratedTypeKind) -> syn::Ident {
+        self.get_variant_override(
+            op,
+            status,
+            kind,
+            |ov| ov.name.clone(),
+            format_ident!("Status{}", status),
+        )
     }
 
     /// Get the inner type name override for a status code, if specified.
@@ -91,14 +121,7 @@ impl<'a> ResponseGenerator<'a> {
         status: u16,
         kind: GeneratedTypeKind,
     ) -> Option<syn::Ident> {
-        if let Some(TypeOverride::Rename {
-            variant_overrides, ..
-        }) = self.overrides.get(op.method, &op.path, kind)
-            && let Some(ov) = variant_overrides.get(&status)
-        {
-            return ov.inner_type_name.clone();
-        }
-        None
+        self.get_variant_override(op, status, kind, |ov| ov.inner_type_name.clone(), None)
     }
 
     /// Get the variant attributes for a status code.
@@ -108,14 +131,7 @@ impl<'a> ResponseGenerator<'a> {
         status: u16,
         kind: GeneratedTypeKind,
     ) -> Vec<TokenStream> {
-        if let Some(TypeOverride::Rename {
-            variant_overrides, ..
-        }) = self.overrides.get(op.method, &op.path, kind)
-            && let Some(ov) = variant_overrides.get(&status)
-        {
-            return ov.attrs.clone();
-        }
-        Vec::new()
+        self.get_variant_override(op, status, kind, |ov| ov.attrs.clone(), Vec::new())
     }
 
     /// Validate that all variant overrides reference status codes that exist in the spec.
@@ -132,17 +148,9 @@ impl<'a> ResponseGenerator<'a> {
         let valid_codes: std::collections::HashSet<u16> = op
             .responses
             .iter()
-            .filter_map(|r| match (&r.status_code, kind) {
-                (ResponseStatus::Code(code), GeneratedTypeKind::Ok)
-                    if r.status_code.is_success() =>
-                {
-                    Some(*code)
-                }
-                (ResponseStatus::Code(code), GeneratedTypeKind::Err)
-                    if r.status_code.is_error() =>
-                {
-                    Some(*code)
-                }
+            .filter(|r| Self::response_matches_kind(&r.status_code, kind))
+            .filter_map(|r| match &r.status_code {
+                ResponseStatus::Code(code) => Some(*code),
                 _ => None,
             })
             .collect();
@@ -218,11 +226,7 @@ impl<'a> ResponseGenerator<'a> {
         let responses: Vec<_> = op
             .responses
             .iter()
-            .filter(|r| match kind {
-                GeneratedTypeKind::Ok => r.status_code.is_success(),
-                GeneratedTypeKind::Err => r.status_code.is_error(),
-                GeneratedTypeKind::Query => false,
-            })
+            .filter(|r| Self::response_matches_kind(&r.status_code, kind))
             .collect();
 
         // Handle empty responses with a default enum
@@ -408,35 +412,35 @@ struct VariantInfo {
     attrs: Vec<TokenStream>,
 }
 
+/// Well-known HTTP status codes with their constant names.
+const STATUS_CODE_NAMES: &[(u16, &str)] = &[
+    (200, "OK"),
+    (201, "CREATED"),
+    (202, "ACCEPTED"),
+    (204, "NO_CONTENT"),
+    (301, "MOVED_PERMANENTLY"),
+    (302, "FOUND"),
+    (304, "NOT_MODIFIED"),
+    (400, "BAD_REQUEST"),
+    (401, "UNAUTHORIZED"),
+    (403, "FORBIDDEN"),
+    (404, "NOT_FOUND"),
+    (405, "METHOD_NOT_ALLOWED"),
+    (409, "CONFLICT"),
+    (410, "GONE"),
+    (422, "UNPROCESSABLE_ENTITY"),
+    (429, "TOO_MANY_REQUESTS"),
+    (500, "INTERNAL_SERVER_ERROR"),
+    (501, "NOT_IMPLEMENTED"),
+    (502, "BAD_GATEWAY"),
+    (503, "SERVICE_UNAVAILABLE"),
+    (504, "GATEWAY_TIMEOUT"),
+];
+
 /// Generate a StatusCode expression for a numeric status.
 fn status_code_ident(status: u16) -> TokenStream {
     // Use well-known constants where possible
-    let name = match status {
-        200 => Some("OK"),
-        201 => Some("CREATED"),
-        202 => Some("ACCEPTED"),
-        204 => Some("NO_CONTENT"),
-        301 => Some("MOVED_PERMANENTLY"),
-        302 => Some("FOUND"),
-        304 => Some("NOT_MODIFIED"),
-        400 => Some("BAD_REQUEST"),
-        401 => Some("UNAUTHORIZED"),
-        403 => Some("FORBIDDEN"),
-        404 => Some("NOT_FOUND"),
-        405 => Some("METHOD_NOT_ALLOWED"),
-        409 => Some("CONFLICT"),
-        410 => Some("GONE"),
-        422 => Some("UNPROCESSABLE_ENTITY"),
-        429 => Some("TOO_MANY_REQUESTS"),
-        500 => Some("INTERNAL_SERVER_ERROR"),
-        501 => Some("NOT_IMPLEMENTED"),
-        502 => Some("BAD_GATEWAY"),
-        503 => Some("SERVICE_UNAVAILABLE"),
-        504 => Some("GATEWAY_TIMEOUT"),
-        _ => None,
-    };
-
-    if let Some(name) = name {
+    if let Some((_, name)) = STATUS_CODE_NAMES.iter().find(|(code, _)| *code == status) {
         let ident = format_ident!("{}", name);
         quote! { ::axum::http::StatusCode::#ident }
     } else {

@@ -1,6 +1,6 @@
 //! Core implementation for the oxapi OpenAPI server stub generator.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use openapiv3::OpenAPI;
 use proc_macro2::TokenStream;
@@ -12,7 +12,7 @@ mod responses;
 mod router;
 mod types;
 
-pub use method::MethodTransformer;
+pub use method::{MethodTransformer, ParamRole};
 pub use openapi::{HttpMethod, Operation, OperationParam, ParamLocation, ParsedSpec};
 pub use responses::ResponseGenerator;
 pub use router::RouterGenerator;
@@ -372,12 +372,12 @@ impl Generator {
     }
 
     /// Validate that all operations are covered by trait methods.
-    pub fn validate_coverage(&self, covered: &HashMap<(HttpMethod, String), ()>) -> Result<()> {
+    pub fn validate_coverage(&self, covered: &HashSet<(HttpMethod, String)>) -> Result<()> {
         let mut missing = Vec::new();
 
         for op in self.spec.operations() {
             let key = (op.method, op.path.clone());
-            if !covered.contains_key(&key) {
+            if !covered.contains(&key) {
                 missing.push(format!("{} {}", op.method, op.path));
             }
         }

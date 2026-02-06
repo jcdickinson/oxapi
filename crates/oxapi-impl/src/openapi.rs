@@ -9,6 +9,86 @@ use openapiv3::{OpenAPI, ReferenceOr, Schema, StatusCode};
 
 use crate::{Error, Result};
 
+/// Trait for types that can be resolved from OpenAPI component references.
+trait RefResolvable: Sized {
+    /// The prefix for references to this component type (e.g., "#/components/parameters/").
+    fn component_prefix() -> &'static str;
+
+    /// Get an item from the components section by name.
+    fn get_from_components<'a>(
+        c: &'a openapiv3::Components,
+        name: &str,
+    ) -> Option<&'a ReferenceOr<Self>>;
+}
+
+impl RefResolvable for openapiv3::Parameter {
+    fn component_prefix() -> &'static str {
+        "#/components/parameters/"
+    }
+
+    fn get_from_components<'a>(
+        c: &'a openapiv3::Components,
+        name: &str,
+    ) -> Option<&'a ReferenceOr<Self>> {
+        c.parameters.get(name)
+    }
+}
+
+impl RefResolvable for openapiv3::RequestBody {
+    fn component_prefix() -> &'static str {
+        "#/components/requestBodies/"
+    }
+
+    fn get_from_components<'a>(
+        c: &'a openapiv3::Components,
+        name: &str,
+    ) -> Option<&'a ReferenceOr<Self>> {
+        c.request_bodies.get(name)
+    }
+}
+
+impl RefResolvable for openapiv3::Response {
+    fn component_prefix() -> &'static str {
+        "#/components/responses/"
+    }
+
+    fn get_from_components<'a>(
+        c: &'a openapiv3::Components,
+        name: &str,
+    ) -> Option<&'a ReferenceOr<Self>> {
+        c.responses.get(name)
+    }
+}
+
+/// Resolve a reference to a component, returning the underlying item.
+fn resolve_ref<'a, T: RefResolvable>(
+    ref_or_item: &'a ReferenceOr<T>,
+    spec: &'a OpenAPI,
+) -> Result<&'a T> {
+    match ref_or_item {
+        ReferenceOr::Reference { reference } => {
+            let name = reference
+                .strip_prefix(T::component_prefix())
+                .ok_or_else(|| {
+                    Error::ParseError(format!(
+                        "invalid reference: {} (expected prefix {})",
+                        reference,
+                        T::component_prefix()
+                    ))
+                })?;
+            spec.components
+                .as_ref()
+                .and_then(|c| T::get_from_components(c, name))
+                .and_then(|r| match r {
+                    ReferenceOr::Item(item) => Some(item),
+                    _ => None,
+                })
+                .ok_or_else(|| Error::ParseError(format!("component not found: {}", name)))
+        }
+        ReferenceOr::Item(item) => Ok(item),
+    }
+}
+
 /// HTTP methods supported by OpenAPI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpMethod {
@@ -46,6 +126,11 @@ impl HttpMethod {
             HttpMethod::Head => "head",
             HttpMethod::Options => "options",
         }
+    }
+
+    /// Returns true if this HTTP method typically has a request body.
+    pub fn has_body(&self) -> bool {
+        matches!(self, HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch)
     }
 }
 
@@ -313,25 +398,7 @@ fn resolve_parameter(
     param_ref: &ReferenceOr<openapiv3::Parameter>,
     spec: &OpenAPI,
 ) -> Result<Option<OperationParam>> {
-    let param = match param_ref {
-        ReferenceOr::Reference { reference } => {
-            // Resolve reference
-            let name = reference
-                .strip_prefix("#/components/parameters/")
-                .ok_or_else(|| {
-                    Error::ParseError(format!("invalid parameter reference: {}", reference))
-                })?;
-            spec.components
-                .as_ref()
-                .and_then(|c| c.parameters.get(name))
-                .and_then(|p| match p {
-                    ReferenceOr::Item(item) => Some(item),
-                    _ => None,
-                })
-                .ok_or_else(|| Error::ParseError(format!("parameter not found: {}", name)))?
-        }
-        ReferenceOr::Item(item) => item,
-    };
+    let param = resolve_ref(param_ref, spec)?;
 
     let (location, data) = match param {
         openapiv3::Parameter::Path { parameter_data, .. } => (ParamLocation::Path, parameter_data),
@@ -364,24 +431,7 @@ fn parse_request_body(
     body_ref: &ReferenceOr<openapiv3::RequestBody>,
     spec: &OpenAPI,
 ) -> Result<Option<RequestBody>> {
-    let body = match body_ref {
-        ReferenceOr::Reference { reference } => {
-            let name = reference
-                .strip_prefix("#/components/requestBodies/")
-                .ok_or_else(|| {
-                    Error::ParseError(format!("invalid request body reference: {}", reference))
-                })?;
-            spec.components
-                .as_ref()
-                .and_then(|c| c.request_bodies.get(name))
-                .and_then(|b| match b {
-                    ReferenceOr::Item(item) => Some(item),
-                    _ => None,
-                })
-                .ok_or_else(|| Error::ParseError(format!("request body not found: {}", name)))?
-        }
-        ReferenceOr::Item(item) => item,
-    };
+    let body = resolve_ref(body_ref, spec)?;
 
     // Prefer application/json
     let (content_type, media) = body
@@ -404,24 +454,7 @@ fn parse_response(
     resp_ref: &ReferenceOr<openapiv3::Response>,
     spec: &OpenAPI,
 ) -> Result<Option<OperationResponse>> {
-    let resp = match resp_ref {
-        ReferenceOr::Reference { reference } => {
-            let name = reference
-                .strip_prefix("#/components/responses/")
-                .ok_or_else(|| {
-                    Error::ParseError(format!("invalid response reference: {}", reference))
-                })?;
-            spec.components
-                .as_ref()
-                .and_then(|c| c.responses.get(name))
-                .and_then(|r| match r {
-                    ReferenceOr::Item(item) => Some(item),
-                    _ => None,
-                })
-                .ok_or_else(|| Error::ParseError(format!("response not found: {}", name)))?
-        }
-        ReferenceOr::Item(item) => item,
-    };
+    let resp = resolve_ref(resp_ref, spec)?;
 
     // Get schema from content (prefer application/json)
     let (content_type, schema) = if let Some((ct, media)) = resp
