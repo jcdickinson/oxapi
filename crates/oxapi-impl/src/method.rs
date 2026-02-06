@@ -111,8 +111,14 @@ impl<'a> MethodTransformer<'a> {
     /// Transform the parameters, filling in type elisions.
     ///
     /// The `param_roles` argument contains the role for each parameter that has an
-    /// explicit `#[oxapi(...)]` attribute. Explicit attrs always take precedence.
-    /// Otherwise, we infer from the extractor type name (Path, Query, Json) or full path.
+    /// explicit `#[oxapi(...)]` attribute.
+    ///
+    /// **Important**: If ANY parameter has an explicit role attribute, inference is
+    /// disabled for ALL parameters. This means you must either:
+    /// - Use no explicit attrs (rely entirely on type name detection), OR
+    /// - Use explicit attrs on ALL parameters that need type elision
+    ///
+    /// This allows non-standard use cases like adding a body to a GET request.
     fn transform_params(
         &self,
         method: &syn::TraitItemFn,
@@ -137,15 +143,22 @@ impl<'a> MethodTransformer<'a> {
             }
         }
 
+        // Check if any parameter has an explicit role attribute.
+        // If so, inference is disabled for ALL parameters - only explicit attrs are used.
+        let has_any_explicit = param_roles.iter().any(|r| r.is_some());
+
         // Compute roles for all parameters
-        // Priority: explicit attr > type name detection > Other
         let roles: Vec<ParamRole> = all_params
             .iter()
             .enumerate()
             .map(|(idx, pat_type)| {
-                // Explicit attr takes precedence
+                // Explicit attr always applies
                 if let Some(Some(role)) = param_roles.get(idx) {
                     return *role;
+                }
+                // If any explicit attr is present, don't infer - use Other
+                if has_any_explicit {
+                    return ParamRole::Other;
                 }
                 // Otherwise detect from type name
                 detect_role_from_type(&pat_type.ty)

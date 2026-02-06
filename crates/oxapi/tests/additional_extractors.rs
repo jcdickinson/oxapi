@@ -124,12 +124,12 @@ pub mod api_with_attrs {
         #[oxapi(get, "/items/{id}")]
         async fn get_item(state: State<S>, #[oxapi(path)] path: MyPath<_>);
 
-        // Use standard Json for body but MyPath for path
+        // When ANY explicit role attr is present, ALL params need explicit attrs
         #[oxapi(put, "/items/{id}")]
         async fn update_item(
             state: State<S>,
             #[oxapi(path)] path: MyPath<_>,
-            body: Json<_>, // Json is recognized by name, no attr needed
+            #[oxapi(body)] body: Json<_>,
         );
 
         #[oxapi(get, "/items/search")]

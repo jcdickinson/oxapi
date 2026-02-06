@@ -1,58 +1,85 @@
 ---
-title: Custom Extractors in oxapi Trait Definitions
-description: How custom extractors work in oxapi trait method signatures and the bug fix for preserving use statements
+title: Custom Extractors and Parameter Role Attributes in oxapi
+description: 'How custom extractors and #[oxapi(path/query/body)] parameter attributes work in oxapi trait method signatures'
 tags:
-  bug-fix: true
   project: oxapi
   topic: extractors
+  topic-2: documentation
 created: 2026-02-05T20:36:23.240561559-08:00
-modified: 2026-02-05T20:39:55.57488631-08:00
+modified: 2026-02-05T22:00:12.541022881-08:00
 ---
 
-# Custom Extractors in oxapi
+# Custom Extractors and Parameter Role Attributes in oxapi
 
-## How It Works
+## Parameter Role Attributes
 
-When defining trait methods with `#[oxapi(...)]` attributes:
+Use `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` on method parameters to explicitly specify their role.
 
-1. **Type elision extractors** (e.g., `Path<_>`, `Json<_>`, `Query<_>`) have their inner types inferred from the OpenAPI spec
-2. **Explicit type extractors** (e.g., `Jwt<AppClaims>`, `State<S>`) are passed through unchanged
+### All-or-Nothing Inference
 
-## Bug Fix: Preserving User Imports
-
-The macro was collecting user's `use` statements but not including them in the output.
-
-**Fix in `lib.rs:1087`**: Added `#(#other_items)*` to preserve user imports:
-```rust
-let inner = quote! {
-    #(#other_items)*  // <-- Added this line
-
-    pub mod #types_mod_name { ... }
-    #(#generated_traits)*
-};
-```
-
-## Usage Example
+**Important**: When ANY parameter has an explicit role attribute, type name inference is disabled for ALL parameters. You must either:
+- Use no explicit attrs (rely entirely on type name detection), OR
+- Use explicit attrs on ALL parameters that need type elision
 
 ```rust
-#[oxapi::oxapi(axum, "api.yaml")]
-pub mod api {
-    use super::*;
-    use axum::extract::State;
-    use crate::auth::Jwt;
+// GOOD: No explicit attrs - all types detected by name
+#[oxapi(put, "/items/{id}")]
+async fn update(state: State<S>, path: Path<_>, body: Json<_>);
 
-    pub trait ItemsApi<S: StateProvider> {
-        #[oxapi(post, "/items")]
-        async fn create_item(
-            state: State<S>,       // Works because import is preserved
-            claims: Jwt<AppClaims>, // Custom extractor - passed through
-            body: Json<_>,          // Type elision - inferred from spec
-        );
-    }
-}
+// GOOD: Explicit attrs on all params with type elision
+#[oxapi(put, "/items/{id}")]
+async fn update(
+    state: State<S>,
+    #[oxapi(path)] path: MyPath<_>,
+    #[oxapi(body)] body: Json<_>,
+);
+
+// BAD: Mixed - Json<_> won't be inferred because path has explicit attr
+#[oxapi(put, "/items/{id}")]
+async fn update(
+    state: State<S>,
+    #[oxapi(path)] path: MyPath<_>,
+    body: Json<_>,  // ERROR: `_` not allowed without inference
+);
 ```
 
-## Key Files
-- `crates/oxapi-macro/src/lib.rs:1087` - Output generation (preserves other_items)
-- `crates/oxapi-impl/src/method.rs:208-211` - Unknown types pass through unchanged
-- `crates/oxapi/tests/additional_extractors.rs` - Test demonstrating custom extractors
+### Use Cases
+
+- **Custom extractors**: When extractor name isn't `Path`, `Query`, or `Json`
+- **Non-standard requests**: E.g., adding a body to a GET request
+
+```rust
+#[oxapi(get, "/search")]
+async fn search(
+    state: State<S>,
+    #[oxapi(body)] body: Json<_>,  // Force body role on a GET request
+);
+```
+
+## Custom Extractors (Pass-Through)
+
+Extractors with explicit types (no `_` elision) are passed through unchanged:
+
+```rust
+#[oxapi(post, "/items")]
+async fn create_item(
+    state: State<S>,
+    claims: Jwt<AppClaims>,    // Custom extractor - passed through unchanged
+    body: Json<_>,              // Type elision - inferred from spec
+);
+```
+
+## Implementation
+
+### Role Detection Priority (when no explicit attrs)
+1. Type name detection (`Path`, `Query`, `Json`)
+2. `ParamRole::Other` - passed through unchanged
+
+### When explicit attrs present
+- Only explicitly marked params get roles
+- All other params get `ParamRole::Other`
+
+### Key Files
+- `crates/oxapi-macro/src/lib.rs` - Documentation and attr parsing
+- `crates/oxapi-impl/src/method.rs:140-158` - Inference disable logic
+- `crates/oxapi/tests/additional_extractors.rs` - Test demonstrating all features

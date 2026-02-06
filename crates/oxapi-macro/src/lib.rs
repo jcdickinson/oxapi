@@ -152,6 +152,81 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// );
 /// ```
 ///
+/// # Parameter Role Attributes
+///
+/// Use `#[oxapi(path)]`, `#[oxapi(query)]`, or `#[oxapi(body)]` on method parameters to
+/// explicitly specify their role. This is useful when using custom extractors that oxapi
+/// cannot identify by name:
+///
+/// ```ignore
+/// #[oxapi(get, "/items/{id}")]
+/// async fn get_item(
+///     state: State<S>,
+///     #[oxapi(path)] id: MyCustomPathExtractor<_>,  // Infers inner type from path params
+/// );
+///
+/// #[oxapi(get, "/items/search")]
+/// async fn search(
+///     state: State<S>,
+///     #[oxapi(query)] params: MyQuery<_>,  // Infers inner type as query struct
+/// );
+///
+/// #[oxapi(post, "/items")]
+/// async fn create(
+///     state: State<S>,
+///     #[oxapi(body)] payload: MyBody<_>,  // Infers inner type from request body
+/// );
+/// ```
+///
+/// **Important**: When ANY parameter has an explicit role attribute, type name inference
+/// is disabled for ALL parameters. This means you must either:
+/// - Use no explicit attrs (rely entirely on type name detection), OR
+/// - Use explicit attrs on ALL parameters that need type elision
+///
+/// ```ignore
+/// // GOOD: No explicit attrs - all types detected by name
+/// #[oxapi(put, "/items/{id}")]
+/// async fn update(state: State<S>, path: Path<_>, body: Json<_>);
+///
+/// // GOOD: Explicit attrs on all params with type elision
+/// #[oxapi(put, "/items/{id}")]
+/// async fn update(
+///     state: State<S>,
+///     #[oxapi(path)] path: MyPath<_>,
+///     #[oxapi(body)] body: Json<_>,
+/// );
+///
+/// // BAD: Mixed - Json<_> won't be inferred because path has explicit attr
+/// #[oxapi(put, "/items/{id}")]
+/// async fn update(
+///     state: State<S>,
+///     #[oxapi(path)] path: MyPath<_>,
+///     body: Json<_>,  // ERROR: `_` not allowed without inference
+/// );
+/// ```
+///
+/// This behavior enables non-standard use cases like adding a body to a GET request:
+///
+/// # Custom Extractors
+///
+/// Extractors with explicit types (no `_` elision) are passed through unchanged into the
+/// generated trait. This allows adding authentication, state, or other custom extractors:
+///
+/// ```ignore
+/// #[oxapi(post, "/items")]
+/// async fn create_item(
+///     state: State<S>,
+///     claims: Jwt<AppClaims>,    // Custom extractor - passed through unchanged
+///     body: Json<_>,              // Type elision - inferred from spec
+/// );
+/// ```
+///
+/// The macro only transforms parameters that:
+/// 1. Have type elision (`_` as a type parameter), AND
+/// 2. Are recognized extractors (by name or explicit `#[oxapi(...)]` attribute)
+///
+/// All other parameters are copied unchanged to the generated trait.
+///
 /// # Generated Types
 ///
 /// For each operation, the macro generates:
