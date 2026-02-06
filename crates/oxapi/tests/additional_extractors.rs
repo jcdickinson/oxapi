@@ -411,7 +411,7 @@ fn path_and_query_struct_types() {
     let typed_query = api::types::GetTypedItemQuery {
         version: Some(1i32),
         active: Some(true),
-        score: Some(3.14f32),
+        score: Some(1.5f32),
     };
     let _: Option<i32> = typed_query.version;
     let _: Option<bool> = typed_query.active;
