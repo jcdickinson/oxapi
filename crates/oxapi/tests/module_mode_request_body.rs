@@ -15,8 +15,6 @@ use common::StateProvider;
 
 #[oxapi::oxapi(axum, "tests/module_mode_request_body.yaml")]
 pub mod api {
-    use super::*;
-
     pub trait ItemsApi<S: StateProvider> {
         #[oxapi(map)]
         fn map_routes(router: Router<S>) -> Router<S>;

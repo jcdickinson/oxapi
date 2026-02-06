@@ -72,7 +72,6 @@ where
 
 #[oxapi::oxapi(axum, "tests/additional_extractors.yaml")]
 pub mod api {
-    use super::*;
     use axum::Json;
     use axum::extract::{Path, Query, State};
 
@@ -111,7 +110,6 @@ pub mod api {
 /// (like Json) require FromRequest implementation which is more complex.
 #[oxapi::oxapi(axum, "tests/additional_extractors.yaml")]
 pub mod api_with_attrs {
-    use super::*;
     use axum::extract::{Json, State};
 
     /// Items API demonstrating explicit parameter attributes.
