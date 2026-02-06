@@ -131,11 +131,11 @@ impl TypeGenerator {
             }
 
             // Add request body schemas
-            if let Some(body) = &op.request_body {
-                if let Some(ReferenceOr::Item(schema)) = &body.schema {
-                    let name_hint = format!("{}Body", op_name.to_upper_camel_case());
-                    register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
-                }
+            if let Some(body) = &op.request_body
+                && let Some(ReferenceOr::Item(schema)) = &body.schema
+            {
+                let name_hint = format!("{}Body", op_name.to_upper_camel_case());
+                register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
             }
 
             // Add response body schemas
@@ -230,10 +230,10 @@ impl TypeGenerator {
     /// If found, uses typify's generated ident. Otherwise falls back to manual handling.
     fn type_for_inline_schema(&self, schema: &Schema, name_hint: &str) -> GeneratedType {
         // Check if this schema was pre-registered with typify
-        if let Some(type_id) = self.inline_types.get(name_hint) {
-            if let Ok(typ) = self.type_space.get_type(type_id) {
-                return GeneratedType::simple(typ.ident());
-            }
+        if let Some(type_id) = self.inline_types.get(name_hint)
+            && let Ok(typ) = self.type_space.get_type(type_id)
+        {
+            return GeneratedType::simple(typ.ident());
         }
 
         // Fall back to manual handling for schemas not pre-registered
@@ -508,11 +508,10 @@ fn register_inline_schema(
     schema: &Schema,
     name_hint: String,
 ) {
-    if let Ok(schemars_schema) = to_schemars(schema) {
-        if let Ok(type_id) =
+    if let Ok(schemars_schema) = to_schemars(schema)
+        && let Ok(type_id) =
             type_space.add_type_with_name(&schemars_schema, Some(name_hint.clone()))
-        {
-            inline_types.insert(name_hint, type_id);
-        }
+    {
+        inline_types.insert(name_hint, type_id);
     }
 }

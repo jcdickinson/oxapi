@@ -1638,25 +1638,20 @@ fn collect_query_unknown_fields_from_trait(
 ) -> syn::Result<Vec<(oxapi_impl::HttpMethod, String, Ident)>> {
     let mut fields = Vec::new();
     for item in &trait_item.items {
-        if let syn::TraitItem::Fn(method) = item {
-            // Check if this method has an #[oxapi(method, "/path")] attribute
-            if let Some(oxapi_attr) = find_oxapi_attr(&method.attrs)? {
-                if let OxapiAttr::Route {
-                    method: http_method,
-                    path,
-                } = oxapi_attr
+        if let syn::TraitItem::Fn(method) = item
+            && let Some(OxapiAttr::Route {
+                method: http_method,
+                path,
+            }) = find_oxapi_attr(&method.attrs)?
+        {
+            // Check parameters for #[oxapi(query, unknown_field)]
+            for arg in &method.sig.inputs {
+                if let syn::FnArg::Typed(pat_type) = arg
+                    && let Some(ParamOxapiAttr::Query {
+                        unknown_field: Some(field_name),
+                    }) = find_param_oxapi_attr(&pat_type.attrs)?
                 {
-                    // Check parameters for #[oxapi(query, unknown_field)]
-                    for arg in &method.sig.inputs {
-                        if let syn::FnArg::Typed(pat_type) = arg {
-                            if let Some(ParamOxapiAttr::Query {
-                                unknown_field: Some(field_name),
-                            }) = find_param_oxapi_attr(&pat_type.attrs)?
-                            {
-                                fields.push((http_method, path.clone(), field_name));
-                            }
-                        }
-                    }
+                    fields.push((http_method, path.clone(), field_name));
                 }
             }
         }
