@@ -113,10 +113,7 @@ impl<'de> serde::Deserialize<'de> for Flag {
                 match v {
                     "" | "true" => Ok(Flag(true)),
                     "false" => Ok(Flag(false)),
-                    _ => Err(E::invalid_value(
-                        serde::de::Unexpected::Str(v),
-                        &self,
-                    )),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(v), &self)),
                 }
             }
 
