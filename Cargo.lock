@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "oxapi"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "oxapi-macro",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "oxapi-impl"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "heck",
  "indexmap",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "oxapi-macro"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "heck",
  "oxapi-impl",

@@ -195,7 +195,7 @@ pub enum ResponseStatus {
 impl ResponseStatus {
     pub fn is_success(&self) -> bool {
         match self {
-            ResponseStatus::Code(code) => (200..300).contains(code),
+            ResponseStatus::Code(code) => *code < 400,
             ResponseStatus::Default => false,
         }
     }
