@@ -22,3 +22,6 @@
 //! ```
 
 pub use oxapi_macro::oxapi;
+
+mod flag;
+pub use flag::Flag;
