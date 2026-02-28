@@ -106,6 +106,10 @@ pub mod api {
         // Typed path and query params (uuid, i64, i32, bool, f32)
         #[oxapi(get, "/typed/{user_id}/items/{item_id}")]
         async fn get_typed_item(state: State<S>, path: Path<_>, query: Query<_>);
+
+        // Flag query param (allowEmptyValue: true + boolean schema → oxapi::Flag)
+        #[oxapi(get, "/items/flagged")]
+        async fn list_flagged_items(state: State<S>, query: Query<_>);
     }
 }
 
@@ -152,6 +156,9 @@ pub mod api_with_attrs {
             #[oxapi(path)] path: MyPath<_>,
             #[oxapi(query)] query: MyQuery<_>,
         );
+
+        #[oxapi(get, "/items/flagged")]
+        async fn list_flagged_items(state: State<S>, #[oxapi(query)] query: MyQuery<_>);
     }
 }
 
@@ -183,6 +190,9 @@ pub mod api_with_unknown_query_field {
 
         #[oxapi(get, "/typed/{user_id}/items/{item_id}")]
         async fn get_typed_item(state: State<S>, path: axum::extract::Path<_>, query: Query<_>);
+
+        #[oxapi(get, "/items/flagged")]
+        async fn list_flagged_items(state: State<S>, query: Query<_>);
     }
 }
 
@@ -236,6 +246,13 @@ impl<S: StateProvider> api::ItemsApi<S> for ItemsHandler {
     ) -> Result<api::types::GetTypedItemResponse, api::types::GetTypedItemError> {
         todo!()
     }
+
+    async fn list_flagged_items(
+        axum::extract::State(_state): axum::extract::State<S>,
+        axum::extract::Query(_query): axum::extract::Query<api::types::ListFlaggedItemsQuery>,
+    ) -> api::types::ListFlaggedItemsResponse {
+        todo!()
+    }
 }
 
 /// Handler implementation using explicit parameter attributes with custom extractors.
@@ -287,6 +304,13 @@ impl<S: StateProvider> api_with_attrs::ItemsApiWithAttrs<S> for ItemsHandlerWith
         MyQuery(_query): MyQuery<api_with_attrs::types::GetTypedItemQuery>,
     ) -> Result<api_with_attrs::types::GetTypedItemResponse, api_with_attrs::types::GetTypedItemError>
     {
+        todo!()
+    }
+
+    async fn list_flagged_items(
+        axum::extract::State(_state): axum::extract::State<S>,
+        MyQuery(_query): MyQuery<api_with_attrs::types::ListFlaggedItemsQuery>,
+    ) -> api_with_attrs::types::ListFlaggedItemsResponse {
         todo!()
     }
 }
@@ -367,6 +391,15 @@ impl<S: StateProvider> api_with_unknown_query_field::ItemsApiUnknownField<S>
     > {
         todo!()
     }
+
+    async fn list_flagged_items(
+        axum::extract::State(_state): axum::extract::State<S>,
+        axum::extract::Query(_query): axum::extract::Query<
+            api_with_unknown_query_field::types::ListFlaggedItemsQuery,
+        >,
+    ) -> api_with_unknown_query_field::types::ListFlaggedItemsResponse {
+        todo!()
+    }
 }
 
 #[test]
@@ -426,4 +459,27 @@ fn path_and_query_struct_types() {
     };
     let _: String = search_query.q;
     let _: Option<i64> = search_query.limit;
+}
+
+/// Test that allowEmptyValue + boolean schema generates oxapi::Flag
+#[test]
+fn allow_empty_value_generates_flag() {
+    // verbose has allowEmptyValue: true → oxapi::Flag
+    // active has no allowEmptyValue → Option<bool>
+    let query = api::types::ListFlaggedItemsQuery {
+        verbose: oxapi::Flag(true),
+        active: Some(true),
+    };
+    let _: oxapi::Flag = query.verbose;
+    let _: Option<bool> = query.active;
+
+    // Flag defaults to false
+    let query: api::types::ListFlaggedItemsQuery =
+        serde_urlencoded::from_str("active=true").unwrap();
+    assert!(!query.verbose.is_set());
+    assert_eq!(query.active, Some(true));
+
+    // Bare presence (empty value) sets Flag to true
+    let query: api::types::ListFlaggedItemsQuery = serde_urlencoded::from_str("verbose=").unwrap();
+    assert!(query.verbose.is_set());
 }

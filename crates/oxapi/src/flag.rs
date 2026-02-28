@@ -2,13 +2,17 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-/// A query parameter flag. Present means `true`, absent means `false`.
+/// A query parameter flag for presence-only boolean parameters.
+///
+/// Generated automatically when an OpenAPI query parameter has
+/// `allowEmptyValue: true` and a `boolean` schema. Present means `true`,
+/// absent means `false`.
 ///
 /// Deserializes from bare presence (`?flag` or `?flag=`), explicit `?flag=true`,
-/// or `?flag=false`. Defaults to `false` when the parameter is absent.
+/// `?flag=false`, or a JSON boolean. Defaults to `false` when the parameter is absent.
 ///
-/// Serializes as `""` when `true` and `"false"` when `false`.
-/// Use `#[serde(skip_serializing_if = "Flag::is_unset")]` to omit when `false`.
+/// Serializes as a boolean. Use `#[serde(skip_serializing_if = "Flag::is_unset")]`
+/// to omit when `false`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Flag(pub bool);
@@ -152,7 +156,7 @@ mod tests {
     #[test]
     fn from_bool() {
         assert_eq!(Flag::from(true), true);
-        assert_eq!(bool::from(Flag(false)), false);
+        assert!(!bool::from(Flag(false)));
     }
 
     #[test]

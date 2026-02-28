@@ -205,6 +205,30 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 /// - `{OperationId}Query` - Struct for query parameters (if operation has query params)
 /// - `{OperationId}Path` - Struct for path parameters (if operation has path params)
 ///
+/// ## Flag Query Parameters
+///
+/// When a query parameter has `allowEmptyValue: true` and a `boolean` schema, the generated
+/// field uses [`oxapi::Flag`] instead of `Option<bool>`. This handles presence-only query
+/// parameters like `?verbose` (without a value):
+///
+/// ```yaml
+/// parameters:
+///   - name: verbose
+///     in: query
+///     allowEmptyValue: true
+///     schema:
+///       type: boolean
+/// ```
+///
+/// Generates:
+///
+/// ```ignore
+/// pub struct ListItemsQuery {
+///     #[serde(default)]
+///     pub verbose: oxapi::Flag,
+/// }
+/// ```
+///
 /// All response enums implement `axum::response::IntoResponse`.
 ///
 /// ## Response Headers

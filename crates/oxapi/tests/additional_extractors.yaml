@@ -111,6 +111,31 @@ paths:
                 items:
                   $ref: '#/components/schemas/Item'
 
+  # Test endpoint with allowEmptyValue flag parameters
+  /items/flagged:
+    get:
+      operationId: listFlaggedItems
+      summary: List items with flag query params
+      parameters:
+        - name: verbose
+          in: query
+          allowEmptyValue: true
+          schema:
+            type: boolean
+        - name: active
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Flagged items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+
   # Test endpoint with various parameter types
   /typed/{user_id}/items/{item_id}:
     get:

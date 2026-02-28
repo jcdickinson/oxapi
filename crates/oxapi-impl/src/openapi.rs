@@ -164,6 +164,10 @@ pub struct OperationParam {
     pub required: bool,
     pub schema: Option<ReferenceOr<Schema>>,
     pub description: Option<String>,
+    /// Only valid for query parameters. When `true`, the parameter can be passed
+    /// with an empty value (e.g., `?flag` or `?flag=`). Combined with a boolean
+    /// schema, this generates an `oxapi::Flag` type instead of `bool`.
+    pub allow_empty_value: bool,
 }
 
 /// A parsed response header.
@@ -427,16 +431,24 @@ fn resolve_parameter(
 ) -> Result<Option<OperationParam>> {
     let param = resolve_ref(param_ref, spec)?;
 
-    let (location, data) = match param {
-        openapiv3::Parameter::Path { parameter_data, .. } => (ParamLocation::Path, parameter_data),
-        openapiv3::Parameter::Query { parameter_data, .. } => {
-            (ParamLocation::Query, parameter_data)
+    let (location, data, allow_empty_value) = match param {
+        openapiv3::Parameter::Path { parameter_data, .. } => {
+            (ParamLocation::Path, parameter_data, false)
         }
+        openapiv3::Parameter::Query {
+            parameter_data,
+            allow_empty_value,
+            ..
+        } => (
+            ParamLocation::Query,
+            parameter_data,
+            allow_empty_value.unwrap_or(false),
+        ),
         openapiv3::Parameter::Header { parameter_data, .. } => {
-            (ParamLocation::Header, parameter_data)
+            (ParamLocation::Header, parameter_data, false)
         }
         openapiv3::Parameter::Cookie { parameter_data, .. } => {
-            (ParamLocation::Cookie, parameter_data)
+            (ParamLocation::Cookie, parameter_data, false)
         }
     };
 
@@ -451,6 +463,7 @@ fn resolve_parameter(
         required: data.required,
         schema,
         description: data.description.clone(),
+        allow_empty_value,
     }))
 }
 

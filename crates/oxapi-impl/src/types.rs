@@ -406,6 +406,15 @@ impl TypeGenerator {
 
         let fields = query_params.iter().map(|param| {
             let name = format_ident!("{}", heck::AsSnakeCase(&param.name).to_string());
+
+            // Boolean + allowEmptyValue → Flag (presence-only query param)
+            if param.allow_empty_value && is_boolean_schema(&param.schema) {
+                return quote! {
+                    #[serde(default)]
+                    pub #name: ::oxapi::Flag
+                };
+            }
+
             let ty = self.param_type(param);
 
             if param.required {
@@ -513,6 +522,17 @@ impl TypeGenerator {
 
         Some((struct_name, definition))
     }
+}
+
+/// Check if a parameter schema resolves to a boolean type.
+fn is_boolean_schema(schema: &Option<ReferenceOr<Schema>>) -> bool {
+    matches!(
+        schema,
+        Some(ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::Boolean(_)),
+            ..
+        }))
+    )
 }
 
 /// Convert any serializable schema type to a schemars schema for typify.
