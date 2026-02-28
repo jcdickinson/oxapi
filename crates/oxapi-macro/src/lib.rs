@@ -207,6 +207,32 @@ use syn::{Ident, ItemMod, ItemTrait, LitStr, Token};
 ///
 /// All response enums implement `axum::response::IntoResponse`.
 ///
+/// ## Response Headers
+///
+/// When an OpenAPI response defines `headers`, the corresponding enum variant becomes a struct
+/// variant with `headers` and `body` fields (instead of a tuple variant):
+///
+/// ```ignore
+/// // Spec defines X-Rate-Limit and X-Request-Id headers on the 200 response
+/// // Generated:
+/// #[derive(Debug, Default)]
+/// pub struct GetPetResponseStatus200Headers {
+///     pub x_rate_limit: i64,            // required header
+///     pub x_request_id: Option<String>,  // optional header
+/// }
+///
+/// pub enum GetPetResponse {
+///     Status200 { headers: GetPetResponseStatus200Headers, body: Pet },
+///     Status404, // no headers → unit variant unchanged
+/// }
+/// ```
+///
+/// Header struct naming follows `{EnumName}{VariantName}Headers`. If the enum or variant is
+/// renamed via overrides, the header struct name updates accordingly (e.g., `PetResponseSuccessHeaders`).
+///
+/// Header field types are derived from the OpenAPI schema (integer → `i64`, string → `String`, etc.).
+/// Responses without headers are unchanged (tuple or unit variants).
+///
 /// # Type Customization
 ///
 /// ## Schema Type Conversion

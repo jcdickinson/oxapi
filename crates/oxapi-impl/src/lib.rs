@@ -13,7 +13,9 @@ mod router;
 mod types;
 
 pub use method::{MethodTransformer, ParamRole};
-pub use openapi::{HttpMethod, Operation, OperationParam, ParamLocation, ParsedSpec};
+pub use openapi::{
+    HttpMethod, Operation, OperationParam, ParamLocation, ParsedSpec, ResponseHeader,
+};
 pub use responses::ResponseGenerator;
 pub use router::RouterGenerator;
 pub use types::TypeGenerator;

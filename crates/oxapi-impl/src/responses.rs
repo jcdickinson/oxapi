@@ -1,9 +1,10 @@
 //! Response enum generation.
 
+use heck::AsSnakeCase;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 
-use crate::openapi::{Operation, ParsedSpec, ResponseStatus};
+use crate::openapi::{Operation, ParsedSpec, ResponseHeader, ResponseStatus};
 use crate::types::TypeGenerator;
 use crate::{GeneratedTypeKind, ResponseSuffixes, TypeOverride, TypeOverrides};
 
@@ -257,6 +258,7 @@ impl<'a> ResponseGenerator<'a> {
                     status,
                     is_default,
                     attrs: variant_attrs,
+                    headers: resp.headers.clone(),
                 }
             })
             .collect();
@@ -310,15 +312,42 @@ impl<'a> ResponseGenerator<'a> {
             inline_definitions,
         } = self.collect_variants(op, kind, &enum_name, &responses);
 
+        // Generate per-variant header structs
+        let header_structs: Vec<_> = variants
+            .iter()
+            .filter(|v| !v.headers.is_empty())
+            .map(|v| self.generate_header_struct(&enum_name, v))
+            .collect();
+
         // Generate variant definitions
         let variant_defs = variants.iter().map(|v| {
             let name = &v.name;
             let attrs = &v.attrs;
-            match (&v.body_type, v.is_default) {
-                (Some(ty), true) => quote! { #(#attrs)* #name(::axum::http::StatusCode, #ty) },
-                (Some(ty), false) => quote! { #(#attrs)* #name(#ty) },
-                (None, true) => quote! { #(#attrs)* #name(::axum::http::StatusCode) },
-                (None, false) => quote! { #(#attrs)* #name },
+            let has_headers = !v.headers.is_empty();
+
+            match (has_headers, &v.body_type, v.is_default) {
+                // Has headers → struct variant
+                (true, Some(ty), true) => {
+                    let hs = header_struct_ident(&enum_name, &v.name);
+                    quote! { #(#attrs)* #name { headers: #hs, status: ::axum::http::StatusCode, body: #ty } }
+                }
+                (true, Some(ty), false) => {
+                    let hs = header_struct_ident(&enum_name, &v.name);
+                    quote! { #(#attrs)* #name { headers: #hs, body: #ty } }
+                }
+                (true, None, true) => {
+                    let hs = header_struct_ident(&enum_name, &v.name);
+                    quote! { #(#attrs)* #name { headers: #hs, status: ::axum::http::StatusCode } }
+                }
+                (true, None, false) => {
+                    let hs = header_struct_ident(&enum_name, &v.name);
+                    quote! { #(#attrs)* #name { headers: #hs } }
+                }
+                // No headers → tuple or unit variant (unchanged)
+                (false, Some(ty), true) => quote! { #(#attrs)* #name(::axum::http::StatusCode, #ty) },
+                (false, Some(ty), false) => quote! { #(#attrs)* #name(#ty) },
+                (false, None, true) => quote! { #(#attrs)* #name(::axum::http::StatusCode) },
+                (false, None, false) => quote! { #(#attrs)* #name },
             }
         });
 
@@ -326,24 +355,61 @@ impl<'a> ResponseGenerator<'a> {
         let into_response_arms = variants.iter().map(|v| {
             let name = &v.name;
             let status_code = status_code_ident(v.status);
+            let has_headers = !v.headers.is_empty();
 
-            match (&v.body_type, v.is_default) {
-                (Some(_), true) => quote! {
+            let insert_headers = if has_headers {
+                self.generate_header_insertions(&v.headers)
+            } else {
+                quote! {}
+            };
+
+            match (has_headers, &v.body_type, v.is_default) {
+                // With headers → struct variant destructuring
+                (true, Some(_), true) => quote! {
+                    Self::#name { headers, status, body } => {
+                        let mut response = (status, ::axum::Json(body)).into_response();
+                        #insert_headers
+                        response
+                    }
+                },
+                (true, Some(_), false) => quote! {
+                    Self::#name { headers, body } => {
+                        let mut response = (#status_code, ::axum::Json(body)).into_response();
+                        #insert_headers
+                        response
+                    }
+                },
+                (true, None, true) => quote! {
+                    Self::#name { headers, status } => {
+                        let mut response = status.into_response();
+                        #insert_headers
+                        response
+                    }
+                },
+                (true, None, false) => quote! {
+                    Self::#name { headers } => {
+                        let mut response = #status_code.into_response();
+                        #insert_headers
+                        response
+                    }
+                },
+                // Without headers → unchanged
+                (false, Some(_), true) => quote! {
                     Self::#name(status, body) => {
                         (status, ::axum::Json(body)).into_response()
                     }
                 },
-                (Some(_), false) => quote! {
+                (false, Some(_), false) => quote! {
                     Self::#name(body) => {
                         (#status_code, ::axum::Json(body)).into_response()
                     }
                 },
-                (None, true) => quote! {
+                (false, None, true) => quote! {
                     Self::#name(status) => {
                         status.into_response()
                     }
                 },
-                (None, false) => quote! {
+                (false, None, false) => quote! {
                     Self::#name => {
                         #status_code.into_response()
                     }
@@ -379,6 +445,8 @@ impl<'a> ResponseGenerator<'a> {
 
             #(#inline_definitions)*
 
+            #(#header_structs)*
+
             #enum_def
 
             impl ::axum::response::IntoResponse for #enum_name {
@@ -390,6 +458,63 @@ impl<'a> ResponseGenerator<'a> {
                 }
             }
         }
+    }
+
+    /// Generate a header struct for a variant that has response headers.
+    fn generate_header_struct(&self, enum_name: &syn::Ident, variant: &VariantInfo) -> TokenStream {
+        let struct_name = header_struct_ident(enum_name, &variant.name);
+
+        let fields = variant.headers.iter().map(|h| {
+            let field_name = format_ident!("{}", AsSnakeCase(&h.name).to_string());
+            let inner_type = if let Some(schema) = &h.schema {
+                self.type_gen.type_for_schema(schema, &h.name)
+            } else {
+                quote! { String }
+            };
+
+            let field_type = if h.required {
+                inner_type
+            } else {
+                quote! { Option<#inner_type> }
+            };
+
+            quote! { pub #field_name: #field_type }
+        });
+
+        quote! {
+            #[derive(Debug, Default)]
+            pub struct #struct_name {
+                #(#fields,)*
+            }
+        }
+    }
+
+    /// Generate header insertion code for the IntoResponse impl.
+    fn generate_header_insertions(&self, headers: &[ResponseHeader]) -> TokenStream {
+        let insertions = headers.iter().map(|h| {
+            let field_name = format_ident!("{}", AsSnakeCase(&h.name).to_string());
+            let header_name = h.name.to_lowercase();
+
+            if h.required {
+                quote! {
+                    response.headers_mut().insert(
+                        ::axum::http::HeaderName::from_static(#header_name),
+                        ::axum::http::HeaderValue::from_str(&headers.#field_name.to_string()).unwrap(),
+                    );
+                }
+            } else {
+                quote! {
+                    if let Some(ref v) = headers.#field_name {
+                        response.headers_mut().insert(
+                            ::axum::http::HeaderName::from_static(#header_name),
+                            ::axum::http::HeaderValue::from_str(&v.to_string()).unwrap(),
+                        );
+                    }
+                }
+            }
+        });
+
+        quote! { #(#insertions)* }
     }
 
     /// Generate a fallback enum when no responses are defined in the spec.
@@ -432,6 +557,7 @@ struct VariantInfo {
     status: u16,
     is_default: bool,
     attrs: Vec<TokenStream>,
+    headers: Vec<ResponseHeader>,
 }
 
 /// Result of collecting variants from responses.
@@ -465,6 +591,11 @@ const STATUS_CODE_NAMES: &[(u16, &str)] = &[
     (503, "SERVICE_UNAVAILABLE"),
     (504, "GATEWAY_TIMEOUT"),
 ];
+
+/// Generate the header struct identifier: `{EnumName}{VariantName}Headers`.
+fn header_struct_ident(enum_name: &syn::Ident, variant_name: &syn::Ident) -> syn::Ident {
+    format_ident!("{}{}Headers", enum_name, variant_name)
+}
 
 /// Generate a StatusCode expression for a numeric status.
 fn status_code_ident(status: u16) -> TokenStream {

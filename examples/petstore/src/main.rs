@@ -385,9 +385,10 @@ impl UserService for UserServiceImpl {
         let users = state.users.read().await;
         if let (Some(username), Some(_password)) = (&query.username, &query.password) {
             if users.contains_key(username) {
-                Ok(LoginUserResponse::Status200(
-                    "session-token-12345".to_string(),
-                ))
+                Ok(LoginUserResponse::Status200 {
+                    headers: Default::default(),
+                    body: "session-token-12345".to_string(),
+                })
             } else {
                 Err(LoginUserError::Status400)
             }

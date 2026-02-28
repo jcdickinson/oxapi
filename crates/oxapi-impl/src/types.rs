@@ -149,6 +149,28 @@ impl TypeGenerator {
                         format!("{}Response{}", op_name.to_upper_camel_case(), status_suffix);
                     register_inline_schema(&mut type_space, &mut inline_types, schema, name_hint);
                 }
+
+                // Add response header schemas
+                let status_suffix = match resp.status_code {
+                    crate::openapi::ResponseStatus::Code(code) => code.to_string(),
+                    crate::openapi::ResponseStatus::Default => "Default".to_string(),
+                };
+                for header in &resp.headers {
+                    if let Some(ReferenceOr::Item(schema)) = &header.schema {
+                        let name_hint = format!(
+                            "{}Response{}{}",
+                            op_name.to_upper_camel_case(),
+                            status_suffix,
+                            header.name.to_upper_camel_case()
+                        );
+                        register_inline_schema(
+                            &mut type_space,
+                            &mut inline_types,
+                            schema,
+                            name_hint,
+                        );
+                    }
+                }
             }
         }
 

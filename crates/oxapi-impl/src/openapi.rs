@@ -60,6 +60,19 @@ impl RefResolvable for openapiv3::Response {
     }
 }
 
+impl RefResolvable for openapiv3::Header {
+    fn component_prefix() -> &'static str {
+        "#/components/headers/"
+    }
+
+    fn get_from_components<'a>(
+        c: &'a openapiv3::Components,
+        name: &str,
+    ) -> Option<&'a ReferenceOr<Self>> {
+        c.headers.get(name)
+    }
+}
+
 /// Resolve a reference to a component, returning the underlying item.
 fn resolve_ref<'a, T: RefResolvable>(
     ref_or_item: &'a ReferenceOr<T>,
@@ -153,6 +166,15 @@ pub struct OperationParam {
     pub description: Option<String>,
 }
 
+/// A parsed response header.
+#[derive(Debug, Clone)]
+pub struct ResponseHeader {
+    pub name: String,
+    pub required: bool,
+    pub schema: Option<ReferenceOr<Schema>>,
+    pub description: Option<String>,
+}
+
 /// A parsed response.
 #[derive(Debug, Clone)]
 pub struct OperationResponse {
@@ -160,6 +182,7 @@ pub struct OperationResponse {
     pub description: String,
     pub schema: Option<ReferenceOr<Schema>>,
     pub content_type: Option<String>,
+    pub headers: Vec<ResponseHeader>,
 }
 
 /// Response status code or range.
@@ -472,10 +495,27 @@ fn parse_response(
         (None, None)
     };
 
+    // Parse response headers
+    let mut headers = Vec::new();
+    for (name, header_ref) in &resp.headers {
+        let header = resolve_ref(header_ref, spec)?;
+        let header_schema = match &header.format {
+            openapiv3::ParameterSchemaOrContent::Schema(s) => Some(s.clone()),
+            openapiv3::ParameterSchemaOrContent::Content(_) => None,
+        };
+        headers.push(ResponseHeader {
+            name: name.clone(),
+            required: header.required,
+            schema: header_schema,
+            description: header.description.clone(),
+        });
+    }
+
     Ok(Some(OperationResponse {
         status_code: status,
         description: resp.description.clone(),
         schema,
         content_type,
+        headers,
     }))
 }
